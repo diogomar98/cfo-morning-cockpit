@@ -129,6 +129,65 @@ DATA_SCHEMA = os.getenv("CFO_DATA_SCHEMA", "cfo_cockpit")
 DATA_NAMESPACE = f"{DATA_CATALOG}.{DATA_SCHEMA}"
 
 
+def _request_header(name: str):
+    """Safely read a Databricks Apps forwarded request header.
+
+    Streamlit exposes request headers through st.context.headers. Header lookup is
+    normally case-insensitive, but we try common variants explicitly so the
+    diagnostic behaves consistently across Streamlit / Databricks runtime builds.
+    """
+    try:
+        headers = st.context.headers
+    except Exception:
+        return None
+
+    candidates = [
+        name,
+        name.lower(),
+        name.upper(),
+        "-".join(part.capitalize() for part in name.split("-")),
+    ]
+
+    for candidate in candidates:
+        try:
+            value = headers.get(candidate)
+        except Exception:
+            value = None
+        if value:
+            return value
+
+    return None
+
+
+def get_auth_diagnostics() -> dict:
+    """Return non-sensitive Databricks Apps auth diagnostics.
+
+    No token value is ever returned or rendered. Only presence / configuration
+    indicators and the forwarded user identity are surfaced.
+    """
+    user_token = _request_header("x-forwarded-access-token")
+    forwarded_email = _request_header("x-forwarded-email")
+    forwarded_user = (
+        _request_header("x-forwarded-user")
+        or _request_header("x-forwarded-preferred-username")
+    )
+
+    warehouse_id = (
+        os.getenv("DATABRICKS_WAREHOUSE_ID")
+        or os.getenv("CFO_WAREHOUSE_ID")
+    )
+
+    return {
+        "user_token_received": bool(user_token),
+        "signed_in_user_received": bool(forwarded_email or forwarded_user),
+        "signed_in_user": forwarded_email or forwarded_user or "Not forwarded",
+        "warehouse_configured": bool(WAREHOUSE_HTTP_PATH),
+        "warehouse_id_received": bool(warehouse_id),
+        "auth_mode": "User authorization" if user_token else "App service principal",
+        "data_namespace": DATA_NAMESPACE,
+    }
+
+
 def get_connection():
 
     if not WAREHOUSE_HTTP_PATH:
@@ -152,11 +211,7 @@ def get_connection():
     # If user authorization is not configured, fall back to the app service
     # principal so the same source still works in environments where the app
     # service principal has explicit Unity Catalog privileges.
-    user_access_token = None
-    try:
-        user_access_token = st.context.headers.get("x-forwarded-access-token")
-    except Exception:
-        user_access_token = None
+    user_access_token = _request_header("x-forwarded-access-token")
 
     if user_access_token:
         return sql.connect(
@@ -4010,13 +4065,65 @@ if not connection_ok:
         "Unable to load the CFO Cockpit data."
     )
 
-    with st.expander(
-        "Technical details"
-    ):
+    auth_diag = get_auth_diagnostics()
 
-        st.exception(
-            connection_error
+    st.markdown("#### Connection diagnostic")
+    diag_col1, diag_col2, diag_col3 = st.columns(3)
+
+    with diag_col1:
+        st.metric(
+            "User token received",
+            "YES" if auth_diag["user_token_received"] else "NO",
         )
+
+    with diag_col2:
+        st.metric(
+            "Warehouse configured",
+            "YES" if auth_diag["warehouse_configured"] else "NO",
+        )
+
+    with diag_col3:
+        st.metric(
+            "Signed-in user received",
+            "YES" if auth_diag["signed_in_user_received"] else "NO",
+        )
+
+    st.caption(
+        f"Auth mode: {auth_diag['auth_mode']} · "
+        f"User: {auth_diag['signed_in_user']} · "
+        f"Data: {auth_diag['data_namespace']}"
+    )
+
+    if auth_diag["user_token_received"] and auth_diag["warehouse_configured"]:
+        st.info(
+            "The App received a forwarded user token and a SQL warehouse configuration. "
+            "If the connection still fails, the next check is whether the forwarded token "
+            "is accepted by the SQL connector / warehouse for this App authorization context."
+        )
+    elif not auth_diag["user_token_received"]:
+        st.warning(
+            "No forwarded user access token reached Streamlit. The App therefore falls back "
+            "to its service principal. In this ABN setup that service principal does not "
+            "currently have Unity Catalog access."
+        )
+
+    with st.expander(
+        "Technical details",
+        expanded=True,
+    ):
+        st.write(
+            {
+                "auth_mode": auth_diag["auth_mode"],
+                "user_token_received": auth_diag["user_token_received"],
+                "signed_in_user_received": auth_diag["signed_in_user_received"],
+                "warehouse_configured": auth_diag["warehouse_configured"],
+                "warehouse_id_received": auth_diag["warehouse_id_received"],
+                "data_namespace": auth_diag["data_namespace"],
+                "error_type": type(connection_error).__name__ if connection_error else None,
+                "error_message": str(connection_error) if connection_error else None,
+            }
+        )
+        st.exception(connection_error)
 
     st.stop()
 
