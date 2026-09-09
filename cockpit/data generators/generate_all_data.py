@@ -44,7 +44,7 @@ except NameError:
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-DEFAULT_OUTPUT_DIR = os.getenv("CFO_OUTPUT_DIR", "data")
+DEFAULT_OUTPUT_DIR = os.getenv("CFO_OUTPUT_DIR", "/Volumes/frbg3as_studio_a/cfo_cockpit/raw_files/generated")
 
 from generate_bank_history import generate_bank_history
 from generate_bank_daily_signals import (

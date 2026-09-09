@@ -22,7 +22,7 @@ import os
 from pyspark.sql import SparkSession
 
 
-CATALOG = os.getenv("CFO_DATA_CATALOG", "workspace")
+CATALOG = os.getenv("CFO_DATA_CATALOG", "frbg3as_studio_a")
 SCHEMA = os.getenv("CFO_DATA_SCHEMA", "cfo_cockpit")
 RAW_VOLUME = os.getenv("CFO_RAW_VOLUME", "raw_files")
 SOURCE_DIR = os.getenv(

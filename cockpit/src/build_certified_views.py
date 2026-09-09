@@ -18,7 +18,7 @@ import argparse
 import os
 from pyspark.sql import SparkSession
 
-DEFAULT_CATALOG = os.getenv("CFO_DATA_CATALOG", "workspace")
+DEFAULT_CATALOG = os.getenv("CFO_DATA_CATALOG", "frbg3as_studio_a")
 DEFAULT_SCHEMA = os.getenv("CFO_DATA_SCHEMA", "cfo_cockpit")
 
 

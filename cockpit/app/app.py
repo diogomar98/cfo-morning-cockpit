@@ -124,7 +124,7 @@ if not WAREHOUSE_HTTP_PATH:
         WAREHOUSE_HTTP_PATH = f"/sql/1.0/warehouses/{warehouse_id}"
 
 # Data namespace is configurable so the same source can run in personal and ABN environments.
-DATA_CATALOG = os.getenv("CFO_DATA_CATALOG", "workspace")
+DATA_CATALOG = os.getenv("CFO_DATA_CATALOG", "frbg3as_studio_a")
 DATA_SCHEMA = os.getenv("CFO_DATA_SCHEMA", "cfo_cockpit")
 DATA_NAMESPACE = f"{DATA_CATALOG}.{DATA_SCHEMA}"
 
