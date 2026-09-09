@@ -1,3 +1,5 @@
+"""A.R.C. JARVIS-style CFO decision cockpit for Streamlit."""
+
 import os
 import html
 
@@ -113,29 +115,10 @@ def get_query_value(key, default=""):
 
 cfg = Config()
 
-# Environment-specific resources are configured outside source control.
-# Supported options:
-#   DATABRICKS_WAREHOUSE_HTTP_PATH=/sql/1.0/warehouses/<id>
-#   or DATABRICKS_WAREHOUSE_ID=<id>
-WAREHOUSE_HTTP_PATH = os.getenv("DATABRICKS_WAREHOUSE_HTTP_PATH")
-if not WAREHOUSE_HTTP_PATH:
-    warehouse_id = os.getenv("DATABRICKS_WAREHOUSE_ID") or os.getenv("CFO_WAREHOUSE_ID")
-    if warehouse_id:
-        WAREHOUSE_HTTP_PATH = f"/sql/1.0/warehouses/{warehouse_id}"
-
-# Data namespace is configurable so the same source can run in personal and ABN environments.
-DATA_CATALOG = os.getenv("CFO_DATA_CATALOG", "frbg3as_studio_a")
-DATA_SCHEMA = os.getenv("CFO_DATA_SCHEMA", "cfo_cockpit")
-DATA_NAMESPACE = f"{DATA_CATALOG}.{DATA_SCHEMA}"
+WAREHOUSE_HTTP_PATH = "/sql/1.0/warehouses/b4e46e2c640b87c1"
 
 
 def get_connection():
-
-    if not WAREHOUSE_HTTP_PATH:
-        raise RuntimeError(
-            "No SQL warehouse configured. Set DATABRICKS_WAREHOUSE_HTTP_PATH "
-            "or DATABRICKS_WAREHOUSE_ID/CFO_WAREHOUSE_ID in the App environment."
-        )
 
     server_hostname = cfg.host
 
@@ -155,10 +138,6 @@ def get_connection():
 
 def run_query(query: str) -> pd.DataFrame:
 
-    # Keep the SQL definitions readable while allowing the app to switch
-    # between schemas via CFO_DATA_SCHEMA / CFO_DATA_CATALOG.
-    query = query.replace("workspace.cfo_cockpit", DATA_NAMESPACE)
-
     with get_connection() as connection:
 
         with connection.cursor() as cursor:
@@ -172,14 +151,20 @@ def run_query(query: str) -> pd.DataFrame:
 # GENIE CFO COPILOT
 # ============================================================
 
-# Configure the Genie Agent/Space ID through the App environment.
-# Keep environment-specific resource IDs out of GitHub source code.
-# Example app.yaml pattern:
+# Preferred: define GENIE_SPACE_ID in app.yaml using:
+#
 # env:
 #   - name: GENIE_SPACE_ID
 #     valueFrom: genie-space
+#
+# The fallback below is the non-secret Agent / Space ID visible
+# in Databricks. It lets the hackathon app work immediately even
+# before app.yaml is updated.
 
-GENIE_SPACE_ID = os.getenv("GENIE_SPACE_ID")
+GENIE_SPACE_ID = os.getenv(
+    "GENIE_SPACE_ID",
+    "01f19d6fd50d16b09d8d1f86ae580708",
+)
 
 workspace_client = WorkspaceClient(config=cfg)
 
@@ -329,12 +314,6 @@ def ask_cfo_genie(question: str):
     Streamlit-session conversation.
     """
 
-    if not GENIE_SPACE_ID:
-        raise RuntimeError(
-            "GENIE_SPACE_ID is not configured. Add the Genie Agent as an App resource "
-            "and expose its ID through the GENIE_SPACE_ID environment variable."
-        )
-
     conversation_id = st.session_state.get(
         "cfo_genie_conversation_id"
     )
@@ -406,6 +385,33 @@ def build_copilot_request(question: str) -> str:
 
 
 # ============================================================
+# DYNAMIC SCENARIO FUNCTION
+# ============================================================
+
+def run_scenario(
+    ecb_shock_bps: int,
+    corporate_deposit_shock_pct: float,
+    horizon_days: int,
+    replacement_funding_rate_pct: float = 3.25,
+) -> pd.DataFrame:
+
+    # Inputs come exclusively from numeric Streamlit controls.
+    # No user-provided SQL strings are passed into the query.
+
+    query = f"""
+        SELECT *
+        FROM workspace.cfo_cockpit.cfo_run_scenario(
+            {int(ecb_shock_bps)},
+            {float(corporate_deposit_shock_pct)},
+            {int(horizon_days)},
+            {float(replacement_funding_rate_pct)}
+        )
+    """
+
+    return run_query(query)
+
+
+# ============================================================
 # LOAD LIVE DATA
 # ============================================================
 
@@ -423,17 +429,16 @@ news_recent_df = None
 geo_news_df = None
 daily_latest_df = None
 daily_recent_df = None
-daily_country_df = None
-daily_business_country_df = None
 treasury_summary_df = None
 treasury_rate50_df = None
 treasury_snapshot_history_df = None
 treasury_scenarios_df = None
 hedge_options_df = None
 peer_benchmark_df = None
-peer_benchmarks_df = None
 strategic_radar_df = None
 capability_gaps_df = None
+risk_asset_quality_df = None
+risk_asset_quality_available = False
 
 # Horizon is now derived from the certified actuals through a deterministic
 # run-rate baseline in this app. It no longer depends on the legacy Horizon view.
@@ -700,59 +705,6 @@ try:
     )
 
     # --------------------------------------------------------
-    # CERTIFIED COUNTRY / BUSINESS-COUNTRY DRILLDOWNS
-    # Retained as governed sources for geographic and business-line analysis.
-    # --------------------------------------------------------
-
-    daily_country_df = run_query(
-        """
-        SELECT
-            date,
-            country,
-            interest_earning_assets_m,
-            deposit_balance_m,
-            daily_interest_income_m,
-            daily_interest_expense_m,
-            daily_nii_m,
-            weighted_loan_rate_pct,
-            weighted_deposit_rate_pct,
-            annualised_daily_nim_pct,
-            rwa_m,
-            weighted_stage_2_share_pct,
-            weighted_stage_3_share_pct,
-            has_anomaly
-        FROM workspace.cfo_cockpit.cfo_daily_country
-        WHERE date = (
-            SELECT MAX(date)
-            FROM workspace.cfo_cockpit.cfo_daily_country
-        )
-        ORDER BY country
-        """
-    )
-
-    daily_business_country_df = run_query(
-        """
-        SELECT
-            date,
-            country,
-            business_line,
-            interest_earning_assets_m,
-            deposit_balance_m,
-            daily_nii_m,
-            rwa_m,
-            weighted_stage_2_share_pct,
-            weighted_stage_3_share_pct,
-            has_anomaly
-        FROM workspace.cfo_cockpit.cfo_daily_business_country
-        WHERE date = (
-            SELECT MAX(date)
-            FROM workspace.cfo_cockpit.cfo_daily_business_country
-        )
-        ORDER BY country, business_line
-        """
-    )
-
-    # --------------------------------------------------------
     # CERTIFIED TREASURY PULSE
     # Used as a secondary intelligence readout around the radial core.
     # --------------------------------------------------------
@@ -866,23 +818,6 @@ try:
         """
     )
 
-    peer_benchmarks_df = run_query(
-        """
-        SELECT
-            metric,
-            metric_label,
-            peer_count,
-            peer_min,
-            peer_q1,
-            peer_median,
-            peer_q3,
-            peer_max,
-            benchmark_note
-        FROM workspace.cfo_cockpit.cfo_peer_benchmarks
-        ORDER BY metric
-        """
-    )
-
     # --------------------------------------------------------
     # STRATEGIC RADAR
     # --------------------------------------------------------
@@ -932,6 +867,29 @@ try:
         ORDER BY capability_gap DESC
         """
     )
+
+    # --------------------------------------------------------
+    # OPTIONAL CERTIFIED RISK & ASSET-QUALITY SNAPSHOTS
+    # --------------------------------------------------------
+    # This source is intentionally non-blocking. The cockpit remains usable
+    # before the view is deployed and automatically activates Provisions,
+    # EAD, GCA and historical RWA movements when it becomes available.
+    try:
+        risk_asset_quality_df = run_query(
+            """
+            SELECT *
+            FROM workspace.cfo_cockpit.cfo_risk_asset_quality
+            ORDER BY as_of_date DESC
+            LIMIT 2
+            """
+        )
+        risk_asset_quality_available = (
+            risk_asset_quality_df is not None
+            and not risk_asset_quality_df.empty
+        )
+    except Exception:
+        risk_asset_quality_df = pd.DataFrame()
+        risk_asset_quality_available = False
 
     # --------------------------------------------------------
     # CORE LOAD COMPLETE
@@ -1693,7 +1651,7 @@ render_html(
 
         .integrated-system {
             position: relative;
-            max-width: 1450px;
+            max-width: 760px;
             overflow: hidden;
             margin: 1.25rem auto 1.5rem;
             padding: 1rem 1.1rem 0.8rem;
@@ -1769,16 +1727,18 @@ render_html(
             position: relative;
             z-index: 3;
             display: grid;
-            grid-template-columns: minmax(255px, 0.78fr) minmax(590px, 1.72fr) minmax(275px, 0.84fr);
+            grid-template-columns: minmax(0, 1fr);
             align-items: center;
-            gap: 1rem;
-            min-height: 650px;
+            justify-items: center;
+            min-height: 535px;
         }
 
         .dial-viewport {
             position: relative;
             z-index: 3;
+            width: min(100%, 580px);
             min-width: 0;
+            margin: 0 auto;
         }
 
         .dial-viewport::before {
@@ -1799,7 +1759,7 @@ render_html(
             position: relative;
             isolation: isolate;
             z-index: 2;
-            width: min(100%, 680px);
+            width: min(100%, 550px);
             aspect-ratio: 1;
             margin: 0 auto;
             filter: drop-shadow(0 0 26px rgba(20, 158, 203, 0.11));
@@ -2085,8 +2045,8 @@ render_html(
                 51.7% 100%
             );
             background:
-                repeating-radial-gradient(circle, transparent 0 16px, rgba(255,203,102,0.10) 17px, transparent 18px 27px),
-                linear-gradient(225deg, rgba(115,67,20,0.98), rgba(52,43,34,0.96));
+                repeating-radial-gradient(circle, transparent 0 16px, rgba(111,206,255,0.10) 17px, transparent 18px 27px),
+                linear-gradient(225deg, rgba(18,88,119,0.98), rgba(34,28,82,0.96));
         }
 
         .css-sector:hover,
@@ -2184,7 +2144,7 @@ render_html(
 
         .sector-label-brief .sector-metric-html { color:#63EBFF; }
         .sector-label-horizon .sector-metric-html { color:#C8AAFF; }
-        .sector-label-scenario .sector-metric-html { color:#FFD37C; }
+        .sector-label-scenario .sector-metric-html { color:#8FDFFF; }
 
         .sector-sub-html {
             color: #477887;
@@ -2747,7 +2707,7 @@ render_html(
             }
 
             .command-dial-html {
-                width: min(100%, 660px);
+                width: min(100%, 550px);
             }
 
             .system-bottom-rail {
@@ -3245,9 +3205,10 @@ render_html(
         /* The core dial stays visually pure. Secondary intelligence sits
            outside the circle and is accessed through the dock below. */
         .system-grid {
-            grid-template-columns:minmax(260px,0.72fr) minmax(560px,1.55fr) minmax(270px,0.76fr) !important;
-            gap:0.85rem !important;
-            min-height:660px;
+            grid-template-columns:minmax(0,1fr) !important;
+            justify-items:center;
+            gap:0 !important;
+            min-height:535px;
         }
 
         .decision-panel,
@@ -3605,6 +3566,471 @@ render_html(
         .dock-news { border-color:rgba(255,93,122,.25); }
         .dock-news .dock-icon { color:#FF8196; border-color:rgba(255,93,122,.36); }
 
+        /* -------------------------------------------------
+           FOUR CFO DECISION DOMAINS
+           ------------------------------------------------- */
+
+        .domain-grid {
+            display:grid;
+            grid-template-columns:repeat(2,minmax(0,1fr));
+            gap:.72rem;
+            margin:.2rem 0 1rem;
+        }
+
+        .domain-card,
+        .domain-card * {
+            box-sizing:border-box;
+        }
+
+        .domain-card {
+            --domain-accent:var(--cyan);
+            position:relative;
+            isolation:isolate;
+            min-height:224px;
+            overflow:hidden;
+            padding:.88rem;
+            background:
+                radial-gradient(circle at 100% 0%,color-mix(in srgb,var(--domain-accent) 14%,transparent),transparent 42%),
+                linear-gradient(145deg,rgba(7,32,46,.97),rgba(2,15,24,.94));
+            border:1px solid color-mix(in srgb,var(--domain-accent) 35%,transparent);
+            clip-path:polygon(0 0,calc(100% - 22px) 0,100% 22px,100% 100%,14px 100%,0 calc(100% - 14px));
+            box-shadow:inset 0 0 42px rgba(38,194,233,.035),0 18px 38px rgba(0,0,0,.18);
+        }
+
+        .domain-card::before {
+            content:"";
+            position:absolute;
+            left:0;
+            top:0;
+            z-index:1;
+            width:44%;
+            height:2px;
+            background:linear-gradient(90deg,var(--domain-accent),transparent);
+            box-shadow:0 0 14px color-mix(in srgb,var(--domain-accent) 58%,transparent);
+        }
+
+        .domain-card::after {
+            content:"";
+            position:absolute;
+            inset:0;
+            z-index:0;
+            pointer-events:none;
+            opacity:.24;
+            background-image:
+                linear-gradient(rgba(82,231,255,.035) 1px,transparent 1px),
+                linear-gradient(90deg,rgba(82,231,255,.035) 1px,transparent 1px);
+            background-size:18px 18px;
+            mask-image:linear-gradient(to bottom,#000,transparent 72%);
+        }
+
+        .domain-earnings { --domain-accent:#52E7FF; }
+        .domain-balance { --domain-accent:#579CFF; }
+        .domain-capital { --domain-accent:#42F5A7; }
+        .domain-risk { --domain-accent:#B88CFF; }
+
+        .domain-head {
+            position:relative;
+            z-index:3;
+            display:flex;
+            align-items:flex-start;
+            justify-content:space-between;
+            gap:1rem;
+            margin-bottom:.6rem;
+            padding-bottom:.52rem;
+            border-bottom:1px solid color-mix(in srgb,var(--domain-accent) 20%,transparent);
+        }
+
+        .domain-kicker {
+            color:color-mix(in srgb,var(--domain-accent) 72%,#FFFFFF);
+            font:760 .50rem "Cascadia Mono",Consolas,monospace;
+            letter-spacing:.17em;
+            text-transform:uppercase;
+        }
+
+        .domain-title {
+            margin-top:.22rem;
+            color:#EAFBFF;
+            font-size:.96rem;
+            font-weight:720;
+            letter-spacing:.01em;
+        }
+
+        .domain-scope {
+            max-width:48%;
+            color:#547F8D;
+            font:650 .50rem/1.45 "Cascadia Mono",Consolas,monospace;
+            letter-spacing:.055em;
+            text-align:right;
+            text-transform:uppercase;
+        }
+
+        .domain-kpi-grid {
+            position:relative;
+            z-index:4;
+            display:grid;
+            grid-template-columns:repeat(2,minmax(0,1fr));
+            gap:.58rem;
+        }
+
+        .domain-kpi {
+            position:static;
+            min-width:0;
+        }
+
+        .domain-kpi summary {
+            position:relative;
+            display:flex;
+            flex-direction:column;
+            min-height:126px;
+            padding:.66rem .7rem .7rem;
+            cursor:pointer;
+            list-style:none;
+            background:linear-gradient(145deg,rgba(10,43,58,.78),rgba(3,20,30,.82));
+            border:1px solid rgba(105,205,228,.14);
+            border-left:2px solid rgba(105,205,228,.28);
+            outline:none;
+            transition:transform 160ms ease,border-color 160ms ease,background 160ms ease,box-shadow 160ms ease;
+        }
+
+        .domain-kpi summary::-webkit-details-marker { display:none; }
+        .domain-kpi summary::marker { content:""; }
+
+        .domain-kpi:hover summary,
+        .domain-kpi[open] summary,
+        .domain-kpi summary:focus-visible {
+            z-index:6;
+            transform:translateY(-2px);
+            border-color:color-mix(in srgb,var(--domain-accent) 66%,transparent);
+            background:linear-gradient(145deg,rgba(12,58,73,.92),rgba(4,24,36,.92));
+            box-shadow:0 0 18px color-mix(in srgb,var(--domain-accent) 14%,transparent);
+        }
+
+        .domain-kpi[open] summary {
+            border-left-color:var(--domain-accent);
+        }
+
+        .domain-kpi-topline {
+            display:flex;
+            align-items:flex-start;
+            justify-content:space-between;
+            gap:.5rem;
+        }
+
+        .domain-kpi-label {
+            color:#8FBAC6;
+            font:760 .57rem/1.28 "Cascadia Mono",Consolas,monospace;
+            letter-spacing:.07em;
+            text-transform:uppercase;
+        }
+
+        .domain-kpi-code {
+            flex:0 0 auto;
+            color:#365E6B;
+            font:720 .42rem "Cascadia Mono",Consolas,monospace;
+            letter-spacing:.08em;
+        }
+
+        .domain-kpi-value {
+            display:block;
+            overflow:hidden;
+            margin-top:.4rem;
+            color:#F0FDFF;
+            font:580 clamp(1.15rem,1.8vw,1.62rem)/1 "Cascadia Mono",Consolas,monospace;
+            letter-spacing:-.045em;
+            text-overflow:ellipsis;
+            text-shadow:0 0 18px rgba(82,231,255,.18);
+            white-space:nowrap;
+        }
+
+        .domain-kpi-change {
+            display:flex;
+            align-items:center;
+            gap:.35rem;
+            margin-top:.38rem;
+            color:#82C4D2;
+            font:720 .53rem/1.25 "Cascadia Mono",Consolas,monospace;
+        }
+
+        .domain-kpi-change::before {
+            content:"";
+            width:5px;
+            height:5px;
+            flex:0 0 5px;
+            border-radius:50%;
+            background:#82C4D2;
+            box-shadow:0 0 6px currentColor;
+        }
+
+        .tone-good .domain-kpi-change { color:var(--green); }
+        .tone-watch .domain-kpi-change { color:var(--amber); }
+        .tone-info .domain-kpi-change { color:#9ABEFF; }
+        .tone-neutral .domain-kpi-change { color:#6E9AA7; }
+
+        .domain-kpi-why {
+            display:-webkit-box;
+            overflow:hidden;
+            margin-top:.42rem;
+            color:#5F8B98;
+            font-size:.56rem;
+            line-height:1.36;
+            -webkit-box-orient:vertical;
+            -webkit-line-clamp:2;
+        }
+
+        .domain-kpi-why strong {
+            color:#91BEC9;
+            font:760 .48rem "Cascadia Mono",Consolas,monospace;
+            letter-spacing:.08em;
+            text-transform:uppercase;
+        }
+
+        .domain-kpi-why strong::after { content:":"; }
+
+        .kpi-intelligence {
+            position:absolute;
+            left:.88rem;
+            right:.88rem;
+            bottom:.88rem;
+            z-index:8;
+            min-height:7.2rem;
+            padding:.76rem .82rem;
+            background:
+                linear-gradient(135deg,rgba(6,31,43,.98),rgba(3,17,27,.98)),
+                radial-gradient(circle at 0 50%,color-mix(in srgb,var(--domain-accent) 11%,transparent),transparent 58%);
+            border:1px solid color-mix(in srgb,var(--domain-accent) 23%,transparent);
+            clip-path:polygon(0 0,calc(100% - 13px) 0,100% 13px,100% 100%,0 100%);
+        }
+
+        .kpi-intelligence {
+            z-index:20;
+            display:grid;
+            grid-template-columns:1fr 1fr;
+            gap:.9rem;
+            visibility:hidden;
+            opacity:0;
+            pointer-events:none;
+            transform:translateY(8px) scale(.985);
+            transition:opacity 150ms ease,transform 170ms ease,visibility 150ms ease;
+        }
+
+        .domain-kpi:hover .kpi-intelligence,
+        .domain-kpi:focus-within .kpi-intelligence,
+        .domain-kpi[open] .kpi-intelligence {
+            visibility:visible;
+            opacity:1;
+            pointer-events:auto;
+            transform:translateY(0) scale(1);
+        }
+
+        .kpi-intel-block {
+            min-width:0;
+            padding-left:.72rem;
+            border-left:2px solid color-mix(in srgb,var(--domain-accent) 62%,transparent);
+        }
+
+        .kpi-intel-label {
+            color:color-mix(in srgb,var(--domain-accent) 72%,#FFFFFF);
+            font:780 .49rem "Cascadia Mono",Consolas,monospace;
+            letter-spacing:.14em;
+            text-transform:uppercase;
+        }
+
+        .kpi-intel-copy {
+            display:block;
+            margin-top:.34rem;
+            color:#A6C6CE;
+            font-size:.66rem;
+            line-height:1.44;
+        }
+
+        .domain-global-cue {
+            display:inline-flex;
+            align-items:center;
+            gap:.45rem;
+            margin-top:.62rem;
+            padding:.34rem .56rem;
+            color:#6FA5B3;
+            background:rgba(82,231,255,.025);
+            border:1px solid rgba(82,231,255,.12);
+            font:720 .50rem/1.25 "Cascadia Mono",Consolas,monospace;
+            letter-spacing:.08em;
+            text-transform:uppercase;
+        }
+
+        .domain-global-cue::before {
+            content:"◎";
+            color:#67E9FF;
+            font-size:.8rem;
+            text-shadow:0 0 8px rgba(82,231,255,.55);
+        }
+
+        @media (max-width: 1000px) {
+            .domain-grid { grid-template-columns:1fr; }
+        }
+
+        @media (max-width: 620px) {
+            .domain-card {
+                min-height:370px;
+            }
+            .domain-kpi-grid { grid-template-columns:1fr; }
+            .domain-scope { display:none; }
+            .kpi-intelligence { grid-template-columns:1fr; gap:.6rem; }
+            .kpi-intelligence { min-height:9.7rem; }
+        }
+
+        /* Compact command rail used by the four contextual workspaces. */
+        .detail-command-spacer { height:84px; }
+
+        .detail-command-shell {
+            position:fixed;
+            top:3.05rem;
+            left:max(1.5rem,calc((100vw - 1510px) / 2));
+            right:max(1.5rem,calc((100vw - 1510px) / 2));
+            z-index:999;
+            display:grid;
+            grid-template-columns:58px minmax(240px,1fr) auto;
+            align-items:center;
+            gap:.86rem;
+            min-height:70px;
+            padding:.48rem .68rem;
+            color:#DFFBFF;
+            background:
+                linear-gradient(90deg,rgba(3,19,29,.97),rgba(7,35,50,.96),rgba(3,17,27,.97)),
+                radial-gradient(circle at 12% 50%,rgba(82,231,255,.10),transparent 32%);
+            border:1px solid rgba(82,231,255,.24);
+            box-shadow:0 15px 45px rgba(0,0,0,.40),inset 0 0 26px rgba(82,231,255,.025);
+            clip-path:polygon(0 0,calc(100% - 14px) 0,100% 14px,100% 100%,10px 100%,0 calc(100% - 10px));
+            backdrop-filter:blur(16px);
+        }
+
+        .mini-jarvis {
+            position:relative;
+            display:block;
+            width:54px;
+            height:54px;
+            border-radius:50%;
+            text-decoration:none !important;
+            background:radial-gradient(circle,rgba(24,151,192,.13),transparent 68%);
+            filter:drop-shadow(0 0 9px rgba(82,231,255,.28));
+        }
+
+        .mini-jarvis::before,
+        .mini-jarvis::after,
+        .mini-jarvis-ring,
+        .mini-jarvis-core {
+            content:"";
+            position:absolute;
+            border-radius:50%;
+        }
+
+        .mini-jarvis::before {
+            inset:1px;
+            background:conic-gradient(from -30deg,#52E7FF 0 31%,transparent 31% 34%,#579CFF 34% 65%,transparent 65% 68%,#B88CFF 68% 98%,transparent 98%);
+            -webkit-mask:radial-gradient(circle,transparent 0 78%,#000 80% 91%,transparent 93%);
+            mask:radial-gradient(circle,transparent 0 78%,#000 80% 91%,transparent 93%);
+            animation:rotate-cw 16s linear infinite;
+        }
+
+        .mini-jarvis::after {
+            inset:5px;
+            opacity:.72;
+            background:repeating-conic-gradient(rgba(120,234,255,.8) 0deg .8deg,transparent .8deg 10deg);
+            -webkit-mask:radial-gradient(circle,transparent 0 83%,#000 85% 91%,transparent 93%);
+            mask:radial-gradient(circle,transparent 0 83%,#000 85% 91%,transparent 93%);
+            animation:rotate-ccw 22s linear infinite;
+        }
+
+        .mini-jarvis-ring {
+            inset:13px;
+            border:1px solid rgba(82,231,255,.54);
+            box-shadow:inset 0 0 10px rgba(82,231,255,.11),0 0 8px rgba(82,231,255,.10);
+        }
+
+        .mini-jarvis-core {
+            inset:20px;
+            background:#A8F5FF;
+            border:2px solid #E7FDFF;
+            box-shadow:0 0 11px rgba(82,231,255,.9),0 0 22px rgba(82,231,255,.34);
+        }
+
+        .detail-command-copy {
+            display:flex;
+            flex-direction:column;
+            min-width:0;
+        }
+
+        .detail-command-kicker {
+            color:#61DFF6;
+            font:760 .48rem "Cascadia Mono",Consolas,monospace;
+            letter-spacing:.15em;
+            text-transform:uppercase;
+        }
+
+        .detail-command-title {
+            margin-top:.10rem;
+            color:#F0FDFF;
+            font-size:.91rem;
+            font-weight:740;
+        }
+
+        .detail-command-subtitle {
+            overflow:hidden;
+            margin-top:.08rem;
+            color:#658F9D;
+            font-size:.60rem;
+            line-height:1.3;
+            text-overflow:ellipsis;
+            white-space:nowrap;
+        }
+
+        .detail-command-nav {
+            display:flex;
+            align-items:center;
+            gap:.36rem;
+        }
+
+        .detail-command-link {
+            padding:.43rem .54rem;
+            color:#6997A5 !important;
+            background:rgba(82,231,255,.018);
+            border:1px solid rgba(82,231,255,.10);
+            text-decoration:none !important;
+            font:720 .48rem "Cascadia Mono",Consolas,monospace;
+            letter-spacing:.07em;
+            text-transform:uppercase;
+            transition:color 140ms ease,border-color 140ms ease,background 140ms ease;
+        }
+
+        .detail-command-link:hover,
+        .detail-command-link.is-active {
+            color:#E8FCFF !important;
+            border-color:rgba(82,231,255,.48);
+            background:rgba(82,231,255,.07);
+        }
+
+        @media (max-width: 900px) {
+            .detail-command-spacer { height:126px; }
+            .detail-command-shell {
+                grid-template-columns:50px minmax(0,1fr);
+                top:2.75rem;
+            }
+            .mini-jarvis { width:46px; height:46px; }
+            .mini-jarvis-ring { inset:11px; }
+            .mini-jarvis-core { inset:17px; }
+            .detail-command-nav {
+                grid-column:1 / -1;
+                display:grid;
+                grid-template-columns:repeat(4,minmax(0,1fr));
+            }
+            .detail-command-link { text-align:center; }
+        }
+
+        @media (max-width: 520px) {
+            .detail-command-shell { left:.7rem; right:.7rem; }
+            .detail-command-subtitle { display:none; }
+            .detail-command-link { padding:.38rem .25rem; font-size:.43rem; }
+        }
+
         .position-capital::before {
             background:linear-gradient(90deg,var(--green),transparent) !important;
             box-shadow:0 0 14px rgba(66,245,167,.50) !important;
@@ -3751,8 +4177,8 @@ render_html(
 
         @media (max-width:1120px) {
             .system-grid {
-                grid-template-columns:minmax(210px,0.62fr) minmax(520px,1.45fr) minmax(220px,0.64fr) !important;
-                gap:0.55rem !important;
+                grid-template-columns:minmax(0,1fr) !important;
+                gap:0 !important;
             }
             .decision-secondary { display:none; }
             .focus-metric-grid { grid-template-columns:1fr; }
@@ -4057,6 +4483,27 @@ prev_ytd_roe, prev_ytd_ci = ytd_metrics_through(financial_history_df, previous_h
 ytd_roe_delta_pp = ytd_roe_proxy - safe_float(prev_ytd_roe, ytd_roe_proxy)
 ytd_ci_delta_pp = ytd_cost_income - safe_float(prev_ytd_ci, ytd_cost_income)
 
+
+def period_growth_pct(current_value, previous_value):
+    previous_value = safe_float(previous_value)
+    if previous_value == 0:
+        return None
+    return (safe_float(current_value) - previous_value) / abs(previous_value) * 100.0
+
+
+operating_income_mom_pct = period_growth_pct(
+    latest_history["operating_income_m"],
+    previous_history["operating_income_m"],
+)
+operating_costs_mom_pct = period_growth_pct(
+    latest_history["operating_costs_m"],
+    previous_history["operating_costs_m"],
+)
+cet1_capital_mom_m = (
+    cet1_capital
+    - safe_float(previous_history["cet1_capital_m"], cet1_capital)
+)
+
 monthly_nim_cert_df["month"] = pd.to_datetime(monthly_nim_cert_df["month"])
 monthly_nim_cert_df["nim_pct"] = pd.to_numeric(monthly_nim_cert_df["nim_pct"], errors="coerce")
 monthly_nim_cert_df["monthly_nii_m"] = pd.to_numeric(monthly_nim_cert_df["monthly_nii_m"], errors="coerce")
@@ -4125,6 +4572,168 @@ if credit_detail_df is not None and not credit_detail_df.empty:
         match = ct[(ct["country"] == credit_hotspot["country"]) & (ct["business_line"] == credit_hotspot["business_line"])].sort_values("date")
         if len(match) >= 2:
             credit_hotspot_stage2_delta_pp = safe_float(match.iloc[-1]["weighted_stage_2_share_pct"]) - safe_float(match.iloc[0]["weighted_stage_2_share_pct"])
+
+
+# Certified loan growth is aggregated by business segment before calculating
+# the change, avoiding an average of country-level percentages.
+loan_segment_name = None
+loan_segment_current_m = None
+loan_segment_change_m = None
+loan_segment_change_pct = None
+loan_segment_laggard = None
+loan_segment_laggard_pct = None
+total_loan_30d_change_m = None
+total_loan_30d_change_pct = None
+
+if credit_trend_df is not None and not credit_trend_df.empty:
+    loan_trend = credit_trend_df.copy()
+    loan_trend["date"] = pd.to_datetime(loan_trend["date"])
+    loan_trend["loan_balance_m"] = pd.to_numeric(
+        loan_trend["loan_balance_m"],
+        errors="coerce",
+    )
+    loan_trend = loan_trend.dropna(
+        subset=["date", "business_line", "loan_balance_m"]
+    )
+
+    loan_dates = sorted(loan_trend["date"].dropna().unique())
+    if len(loan_dates) >= 2:
+        prior_loan_date = loan_dates[0]
+        latest_loan_date = loan_dates[-1]
+        prior_by_segment = (
+            loan_trend[loan_trend["date"] == prior_loan_date]
+            .groupby("business_line", as_index=False)["loan_balance_m"]
+            .sum()
+            .rename(columns={"loan_balance_m": "prior_loan_m"})
+        )
+        latest_by_segment = (
+            loan_trend[loan_trend["date"] == latest_loan_date]
+            .groupby("business_line", as_index=False)["loan_balance_m"]
+            .sum()
+            .rename(columns={"loan_balance_m": "latest_loan_m"})
+        )
+        loan_segment_growth_df = prior_by_segment.merge(
+            latest_by_segment,
+            on="business_line",
+            how="outer",
+        ).fillna(0.0)
+        loan_segment_growth_df["change_m"] = (
+            loan_segment_growth_df["latest_loan_m"]
+            - loan_segment_growth_df["prior_loan_m"]
+        )
+        loan_segment_growth_df["change_pct"] = loan_segment_growth_df.apply(
+            lambda row: (
+                row["change_m"] / abs(row["prior_loan_m"]) * 100.0
+                if row["prior_loan_m"]
+                else None
+            ),
+            axis=1,
+        )
+
+        material_segment = loan_segment_growth_df.assign(
+            absolute_change_m=loan_segment_growth_df["change_m"].abs()
+        ).sort_values("absolute_change_m", ascending=False).iloc[0]
+        loan_segment_name = str(material_segment["business_line"])
+        loan_segment_current_m = safe_float(material_segment["latest_loan_m"])
+        loan_segment_change_m = safe_float(material_segment["change_m"])
+        loan_segment_change_pct = (
+            None
+            if pd.isna(material_segment["change_pct"])
+            else safe_float(material_segment["change_pct"])
+        )
+
+        segments_with_pct = loan_segment_growth_df.dropna(
+            subset=["change_pct"]
+        ).sort_values("change_pct")
+        if not segments_with_pct.empty:
+            weakest_segment = segments_with_pct.iloc[0]
+            loan_segment_laggard = str(weakest_segment["business_line"])
+            loan_segment_laggard_pct = safe_float(
+                weakest_segment["change_pct"]
+            )
+
+        total_latest_loans = safe_float(
+            loan_segment_growth_df["latest_loan_m"].sum()
+        )
+        total_prior_loans = safe_float(
+            loan_segment_growth_df["prior_loan_m"].sum()
+        )
+        total_loan_30d_change_m = total_latest_loans - total_prior_loans
+        if total_prior_loans:
+            total_loan_30d_change_pct = (
+                total_loan_30d_change_m
+                / abs(total_prior_loans)
+                * 100.0
+            )
+
+
+# Optional risk snapshot values. RWA falls back to the certified current
+# position; Provisions, EAD and GCA stay explicitly unavailable until a
+# certified source is connected rather than being estimated from loan data.
+risk_current_row = None
+risk_previous_row = None
+if risk_asset_quality_available:
+    risk_asset_quality_df = risk_asset_quality_df.copy()
+    risk_asset_quality_df.columns = [
+        str(column).lower()
+        for column in risk_asset_quality_df.columns
+    ]
+    if "as_of_date" in risk_asset_quality_df.columns:
+        risk_asset_quality_df["as_of_date"] = pd.to_datetime(
+            risk_asset_quality_df["as_of_date"],
+            errors="coerce",
+        )
+        risk_asset_quality_df = risk_asset_quality_df.sort_values(
+            "as_of_date"
+        )
+    risk_current_row = risk_asset_quality_df.iloc[-1]
+    risk_previous_row = (
+        risk_asset_quality_df.iloc[-2]
+        if len(risk_asset_quality_df) >= 2
+        else None
+    )
+
+
+def optional_snapshot_metric(column, fallback_current=None):
+    current_value = fallback_current
+    previous_value = None
+
+    if risk_current_row is not None and column in risk_current_row.index:
+        raw_current = risk_current_row[column]
+        if not pd.isna(raw_current):
+            current_value = safe_float(raw_current)
+
+    if (
+        risk_previous_row is not None
+        and column in risk_previous_row.index
+        and not pd.isna(risk_previous_row[column])
+    ):
+        previous_value = safe_float(risk_previous_row[column])
+
+    change_value = (
+        None
+        if current_value is None or previous_value is None
+        else current_value - previous_value
+    )
+    return current_value, change_value
+
+
+def optional_risk_driver(metric_name, fallback_text):
+    if risk_current_row is None:
+        return fallback_text
+    for suffix in ("_driver", "_change_driver", "_driver_summary"):
+        column = f"{metric_name}{suffix}"
+        if column in risk_current_row.index:
+            value = risk_current_row[column]
+            if not pd.isna(value) and str(value).strip():
+                return str(value).strip()
+    return fallback_text
+
+
+provisions_m, provisions_change_m = optional_snapshot_metric("provisions_m")
+ead_m, ead_change_m = optional_snapshot_metric("ead_m")
+gca_m, gca_change_m = optional_snapshot_metric("gca_m")
+risk_rwa_m, risk_rwa_change_m = optional_snapshot_metric("rwa_m", rwa)
 
 high_impact_news_count = 0
 top_news = None
@@ -4214,6 +4823,82 @@ def clip_ui_text(value, max_chars=62):
     return text_value[: max_chars - 1].rstrip() + "…"
 
 
+def movement_text(value, unit="", decimals=1, comparison="vs prior period"):
+    if value is None or pd.isna(value):
+        return "No comparable snapshot"
+    arrow = "↑" if value > 0 else "↓" if value < 0 else "→"
+    return f"{arrow} {abs(value):,.{decimals}f}{unit} {comparison}"
+
+
+def metric_tone(value, higher_is_better=None):
+    if value is None or pd.isna(value) or value == 0:
+        return "neutral"
+    if higher_is_better is None:
+        return "info"
+    is_positive = value > 0 if higher_is_better else value < 0
+    return "good" if is_positive else "watch"
+
+
+def money_bn(value_m, decimals=1):
+    if value_m is None or pd.isna(value_m):
+        return "—"
+    return f"€{value_m / 1000:,.{decimals}f}bn"
+
+
+def domain_kpi_html(
+    code,
+    label,
+    value,
+    change,
+    why,
+    impact,
+    recommendation,
+    tone="neutral",
+):
+    """Native details/summary interaction: hover previews; click pins."""
+    return f"""
+        <details name="cfo-kpi-intelligence" class="domain-kpi tone-{html.escape(str(tone))}">
+            <summary aria-label="Inspect {html.escape(str(label))}">
+                <span class="domain-kpi-topline">
+                    <span class="domain-kpi-label">{html.escape(str(label))}</span>
+                    <span class="domain-kpi-code">{html.escape(str(code))}</span>
+                </span>
+                <span class="domain-kpi-value">{html.escape(str(value))}</span>
+                <span class="domain-kpi-change">{html.escape(str(change))}</span>
+                <span class="domain-kpi-why">
+                    <strong>Why</strong> {html.escape(str(why))}
+                </span>
+            </summary>
+            <span class="kpi-intelligence" role="note">
+                <span class="kpi-intel-block">
+                    <strong class="kpi-intel-label">Impact</strong>
+                    <span class="kpi-intel-copy">{html.escape(str(impact))}</span>
+                </span>
+                <span class="kpi-intel-block">
+                    <strong class="kpi-intel-label">Recommendation</strong>
+                    <span class="kpi-intel-copy">{html.escape(str(recommendation))}</span>
+                </span>
+            </span>
+        </details>
+    """
+
+
+def domain_card_html(code, title, subtitle, accent, kpis):
+    kpi_markup = kpis if isinstance(kpis, str) else "".join(kpis)
+    return f"""
+        <section class="domain-card domain-{html.escape(str(accent))}" data-domain="{html.escape(str(code))}">
+            <div class="domain-head">
+                <div>
+                    <span class="domain-kicker">{html.escape(str(code))}</span>
+                    <div class="domain-title">{html.escape(str(title))}</div>
+                </div>
+                <span class="domain-scope">{html.escape(str(subtitle))}</span>
+            </div>
+            <div class="domain-kpi-grid">{kpi_markup}</div>
+        </section>
+    """
+
+
 def build_rate_sensitivity_svg(df, width=300, height=118):
     """Build a compact certified rate-sensitivity mini chart for the home HUD."""
     if df is None or df.empty:
@@ -4256,7 +4941,27 @@ def build_rate_sensitivity_svg(df, width=300, height=118):
     )
 
 
-executive_change_count = 3
+executive_change_count = sum(
+    [
+        any(abs(value) > 0.01 for value in [nim_mom_bps, monthly_nii_change_m, ytd_ci_delta_pp]),
+        any(
+            value is not None and abs(value) > 0.01
+            for value in [total_deposit_30d_change_pct, total_loan_30d_change_pct]
+        ),
+        any(abs(value) > 0.01 for value in [cet1_mom_pp, lcr_mom_pp]),
+        any(
+            value is not None and abs(value) > 0.01
+            for value in [
+                provisions_change_m,
+                ead_change_m,
+                gca_change_m,
+                risk_rwa_change_m,
+                stage2_mom_pp,
+                stage3_mom_pp,
+            ]
+        ),
+    ]
+)
 
 deposit_signal_primary = "Deposit movement unavailable"
 deposit_signal_secondary = "No latest country deposit observation"
@@ -4295,6 +5000,294 @@ deposit_next = "Review slower-growth markets and business lines before changing 
 credit_why = "Stage 2 concentration is highest in the identified country/business line; the certified data does not establish the underlying cause."
 credit_impact = f"Stage 2 is {safe_float(credit_hotspot['weighted_stage_2_share_pct']):.1f}%" if credit_hotspot is not None else "Credit impact unavailable"
 credit_next = "Investigate migration drivers and provisioning exposure before taking action."
+
+
+# ============================================================
+# FOUR CFO DEC DOMAINS — CHANGE / DRIVER / IMPACT / ACTION
+# ============================================================
+
+income_change_text = (
+    "unavailable"
+    if operating_income_mom_pct is None
+    else f"{operating_income_mom_pct:+.1f}%"
+)
+cost_change_text = (
+    "unavailable"
+    if operating_costs_mom_pct is None
+    else f"{operating_costs_mom_pct:+.1f}%"
+)
+cost_income_why = (
+    f"Monthly operating costs moved {cost_change_text} while operating income "
+    f"moved {income_change_text}; the YTD ratio therefore moved "
+    f"{ytd_ci_delta_pp:+.1f}pp."
+)
+cost_income_impact = (
+    "A higher ratio weakens operating leverage and leaves less revenue to absorb "
+    "credit costs and investment."
+    if ytd_ci_delta_pp > 0
+    else "A lower ratio improves operating leverage and increases earnings capacity."
+)
+cost_income_next = (
+    "Separate run-rate cost, one-offs and revenue mix; assign owners to the largest adverse bridge."
+    if ytd_ci_delta_pp > 0
+    else "Confirm that the improvement is structural before resetting the cost or revenue outlook."
+)
+
+nii_why = (
+    f"NIM moved {nim_mom_bps:+.1f}bps and the observed loan-versus-deposit "
+    f"pricing spread moved {spread_30d_bps:+.1f}bps; these are the certified "
+    "pricing signals behind the latest NII movement."
+)
+nii_impact = (
+    f"Monthly NII changed by €{monthly_nii_change_m:+,.0f}m to "
+    f"€{cert_current_monthly_nii:,.0f}m; YTD NII is €{ytd_nii / 1000:.2f}bn."
+)
+nii_next = "Reconcile rate, volume and mix effects by product and business line before changing guidance."
+
+loan_growth_label = "Loan growth / business segment"
+loan_growth_value = "—"
+loan_growth_change = "No comparable 30D snapshot"
+loan_growth_why = "Certified business-segment loan history is not yet available."
+loan_growth_impact = "The effect on earning assets and RWA cannot yet be quantified by segment."
+loan_growth_next = "Connect two certified business-line snapshots before drawing a growth conclusion."
+
+if loan_segment_name is not None:
+    segment_display = clip_ui_text(loan_segment_name, 28)
+    loan_growth_label = f"Loan growth / {segment_display}"
+    loan_growth_value = (
+        f"{loan_segment_change_pct:+.2f}%"
+        if loan_segment_change_pct is not None
+        else money_bn(loan_segment_change_m, 2)
+    )
+    loan_growth_change = (
+        f"€{loan_segment_change_m / 1000:+.2f}bn over 30D"
+        if loan_segment_change_m is not None
+        else "30D movement unavailable"
+    )
+    weakest_text = (
+        ""
+        if loan_segment_laggard is None
+        else (
+            f" {loan_segment_laggard} is the weakest segment at "
+            f"{loan_segment_laggard_pct:+.2f}%."
+        )
+    )
+    loan_growth_why = (
+        f"{loan_segment_name} has the largest absolute certified loan-book "
+        f"movement over 30D.{weakest_text}"
+    )
+    total_loan_change_text = (
+        "unavailable"
+        if total_loan_30d_change_pct is None
+        else f"{total_loan_30d_change_pct:+.2f}%"
+    )
+    loan_growth_impact = (
+        f"The total observed loan book moved {total_loan_change_text}; segment "
+        "growth changes NII capacity and can consume RWA."
+    )
+    loan_growth_next = (
+        f"Review {loan_segment_name} origination quality, pricing and capital "
+        "consumption before accelerating or constraining growth."
+    )
+
+deposit_value = money_bn(current_deposits_m, 1)
+deposit_change = movement_text(
+    total_deposit_30d_change_pct,
+    "%",
+    2,
+    "over 30D",
+)
+
+cet1_why = (
+    f"CET1 capital moved €{cet1_capital_mom_m:+,.0f}m versus {previous_month_label}. "
+    f"Current RWA is €{rwa / 1000:.1f}bn; the available history does not yet "
+    "provide the complete capital-generation and RWA bridge."
+)
+cet1_impact = (
+    "The CET1 ratio determines loss-absorption and growth capacity; a decline "
+    "uses management buffer even when the bank remains above requirements."
+)
+cet1_next = "Bridge earnings, distributions, OCI and RWA movements against the management buffer."
+
+lcr_why = (
+    f"HQLA is €{hqla / 1000:.1f}bn and deposits moved "
+    f"{total_deposit_30d_change_pct:+.2f}% over 30D. The full stressed-outflow "
+    "bridge is not available in the current view."
+)
+lcr_impact = (
+    "The ratio governs short-term liquidity resilience; adverse movement can "
+    "reduce funding flexibility and increase liquidity-buffer cost."
+)
+lcr_next = "Reconcile HQLA, deposit mix and 30-day stressed outflows; test concentration sensitivity."
+
+provisions_why = optional_risk_driver(
+    "provisions",
+    (
+        "The certified snapshot reports the balance but not the migration, "
+        "scenario and management-overlay bridge."
+        if provisions_m is not None
+        else "No certified provisions snapshot is connected; no proxy has been inferred."
+    ),
+)
+ead_why = optional_risk_driver(
+    "ead",
+    (
+        "The certified snapshot reports the movement but not utilization, "
+        "new-business, repayment and CCF components."
+        if ead_m is not None
+        else "No certified EAD snapshot is connected; loan balances are not used as a proxy."
+    ),
+)
+gca_why = optional_risk_driver(
+    "gca",
+    (
+        "The certified snapshot reports the movement but not new lending, "
+        "repayment, derecognition and FX components."
+        if gca_m is not None
+        else "No certified GCA snapshot is connected; no proxy has been inferred."
+    ),
+)
+rwa_why = optional_risk_driver(
+    "rwa",
+    (
+        "Current RWA density is "
+        f"{rwa_density_pct:.1f}% of assets; a historical RWA driver bridge is "
+        "not present in the current certified history."
+    ),
+)
+
+
+def risk_money_change(value_m):
+    if value_m is None or pd.isna(value_m):
+        return "No comparable snapshot"
+    arrow = "↑" if value_m > 0 else "↓" if value_m < 0 else "→"
+    return f"{arrow} €{abs(value_m) / 1000:.2f}bn vs prior snapshot"
+
+
+provisions_impact = (
+    "Provisions feed credit impairment expense, earnings and ultimately CET1."
+    if provisions_m is not None
+    else "Impact cannot be quantified until a certified provisions balance is connected."
+)
+ead_impact = (
+    "EAD changes the exposure base used in credit-risk and capital assessment."
+    if ead_m is not None
+    else "Impact cannot be quantified until a certified EAD balance is connected."
+)
+gca_impact = (
+    "GCA changes balance-sheet credit exposure and the denominator for asset-quality ratios."
+    if gca_m is not None
+    else "Impact cannot be quantified until a certified GCA balance is connected."
+)
+rwa_impact = (
+    f"RWA is {rwa_density_pct:.1f}% of total assets and is the denominator of CET1; "
+    "growth without capital generation compresses the ratio."
+)
+
+provisions_next = "Decompose stage migration, scenario updates, write-offs and management overlays."
+ead_next = "Bridge utilization, new business, repayments and conversion-factor changes by segment."
+gca_next = "Reconcile originations, repayments, derecognition and FX with the loan-growth view."
+rwa_next = "Bridge credit, market and operational RWA by business line and identify capital-intensive growth."
+
+earnings_kpis = "".join(
+    [
+        domain_kpi_html(
+            "ERN / 01",
+            "Net interest income / margin",
+            f"€{cert_current_monthly_nii:,.0f}m · {cert_current_nim:.2f}%",
+            f"NII {monthly_nii_change_m:+,.0f}m · NIM {nim_mom_bps:+.1f}bps MoM",
+            f"Income: {nii_why} Margin: {nim_why}",
+            f"{nii_impact} {nim_impact}",
+            f"{nii_next} {nim_next}",
+            metric_tone(monthly_nii_change_m, True),
+        ),
+        domain_kpi_html(
+            "ERN / 02",
+            "Cost / income ratio",
+            f"{ytd_cost_income:.1f}%",
+            movement_text(ytd_ci_delta_pp, "pp", 1, "vs prior YTD"),
+            cost_income_why,
+            cost_income_impact,
+            cost_income_next,
+            metric_tone(ytd_ci_delta_pp, False),
+        ),
+    ]
+)
+
+balance_sheet_kpis = "".join(
+    [
+        domain_kpi_html(
+            "BAL / 01",
+            "Deposit movements",
+            deposit_value,
+            deposit_change,
+            deposit_why,
+            deposit_impact,
+            deposit_next,
+            metric_tone(total_deposit_30d_change_pct, True),
+        ),
+        domain_kpi_html(
+            "BAL / 02",
+            loan_growth_label,
+            loan_growth_value,
+            loan_growth_change,
+            loan_growth_why,
+            loan_growth_impact,
+            loan_growth_next,
+            metric_tone(loan_segment_change_pct, None),
+        ),
+    ]
+)
+
+capital_liquidity_kpis = "".join(
+    [
+        domain_kpi_html(
+            "CAP / 01",
+            "CET1 ratio",
+            f"{cet1_ratio:.1f}%",
+            movement_text(cet1_mom_pp, "pp", 1, f"vs {previous_month_label}"),
+            cet1_why,
+            cet1_impact,
+            cet1_next,
+            metric_tone(cet1_mom_pp, True),
+        ),
+        domain_kpi_html(
+            "LIQ / 02",
+            "Liquidity coverage ratio",
+            f"{lcr_ratio:.1f}%",
+            movement_text(lcr_mom_pp, "pp", 1, f"vs {previous_month_label}"),
+            lcr_why,
+            lcr_impact,
+            lcr_next,
+            metric_tone(lcr_mom_pp, True),
+        ),
+    ]
+)
+
+risk_asset_quality_kpis = "".join(
+    [
+        domain_kpi_html(
+            "RAQ / 01",
+            "Provisions",
+            money_bn(provisions_m, 2),
+            risk_money_change(provisions_change_m),
+            provisions_why,
+            provisions_impact,
+            provisions_next,
+            metric_tone(provisions_change_m, False),
+        ),
+        domain_kpi_html(
+            "RAQ / 02",
+            "Risk-weighted assets",
+            money_bn(risk_rwa_m, 1),
+            risk_money_change(risk_rwa_change_m),
+            rwa_why,
+            rwa_impact,
+            rwa_next,
+            metric_tone(risk_rwa_change_m, None),
+        ),
+    ]
+)
 
 treasury_sensitivity_svg = build_rate_sensitivity_svg(treasury_scenarios_df)
 
@@ -5204,8 +6197,11 @@ def render_horizon_legend():
 # HERO
 # ============================================================
 
-render_html(
-    f"""
+selected_module = get_selected_module()
+DETAIL_MODULES = {"strategy", "peers", "treasury", "news"}
+is_detail_workspace = selected_module in DETAIL_MODULES
+
+hero_markup = f"""
     <div class="hud-hero">
         <div class="hero-copy">
             <div class="system-kicker">AI CFO COMMAND CENTER</div>
@@ -5224,106 +6220,79 @@ render_html(
         </div>
     </div>
     """
-)
+
+if not is_detail_workspace:
+    render_html(hero_markup)
 
 
 # ============================================================
-# CFO POSITION — COMFORT FIRST, THEN SCALE / RISK
+# FOUR CFO DECISION DOMAINS
 # ============================================================
 
-render_html(
-    f"""
+domain_heading_markup = f"""
     <div class="section-heading">
         <div>
-            <div class="module-code">Position / current bank condition</div>
-            <div class="section-title">Can the CFO be comfortable with the bank today?</div>
+            <div class="module-code">Decision architecture / four-domain scan</div>
+            <div class="section-title">What moved — and what should management do next?</div>
             <div class="section-subtitle">
-                Capital, liquidity, earnings and asset quality first. Balance-sheet scale and risk
-                sit directly underneath so the position is visible without turning the landing page
-                into a regulatory report.
+                Two management metrics per domain: current value, movement and the
+                observable driver, all in one compact scan.
             </div>
+            <div class="domain-global-cue">Hover to preview · Click to pin impact and recommendation</div>
         </div>
         <div class="sync-copy">As of {reporting_date}</div>
     </div>
     """
+
+if not is_detail_workspace:
+    render_html(domain_heading_markup)
+
+domain_cards_markup = "".join(
+    [
+        domain_card_html(
+            "DOMAIN 01 / ERN",
+            "Earnings",
+            "NII / NIM · Cost / income",
+            "earnings",
+            earnings_kpis,
+        ),
+        domain_card_html(
+            "DOMAIN 02 / BAL",
+            "Balance sheet",
+            "Deposits · Loan growth by segment",
+            "balance",
+            balance_sheet_kpis,
+        ),
+        domain_card_html(
+            "DOMAIN 03 / CAP-LIQ",
+            "Capital & Liquidity",
+            "CET1 · Liquidity coverage ratio",
+            "capital",
+            capital_liquidity_kpis,
+        ),
+        domain_card_html(
+            "DOMAIN 04 / RISK",
+            "Risk & Asset Quality",
+            "Provisions · RWA",
+            "risk",
+            risk_asset_quality_kpis,
+        ),
+    ]
 )
 
-col1, col2, col3, col4 = st.columns(4)
-
-with col1:
-    render_html(
-        f"""<div class="kpi-card position-capital" data-module="CAP / 01">
-        <div class="kpi-label">CAPITAL RESILIENCE</div>
-        <div class="kpi-value">{cet1_ratio:.1f}%</div>
-        <div class="executive-delta position-status-good">CET1 · {arrow_delta(cet1_mom_pp)} vs {previous_month_label}</div>
-        <div class="executive-context">Total capital {total_capital_ratio:.1f}% · €{cet1_capital / 1000:.1f}bn CET1 · RWA €{rwa / 1000:.1f}bn</div>
-        <span class="micro-line"></span></div>"""
-    )
-
-with col2:
-    render_html(
-        f"""<div class="kpi-card position-liquidity" data-module="LIQ / 02">
-        <div class="kpi-label">LIQUIDITY & FUNDING</div>
-        <div class="kpi-value">{lcr_ratio:.1f}%</div>
-        <div class="executive-delta position-status-neutral">LCR · {arrow_delta(lcr_mom_pp)} vs {previous_month_label}</div>
-        <div class="executive-context">HQLA €{hqla / 1000:.1f}bn · L/D {loan_to_deposit_ratio:.1f}% · deposits €{current_deposits_m / 1000:.1f}bn</div>
-        <span class="micro-line"></span></div>"""
-    )
-
-with col3:
-    render_html(
-        f"""<div class="kpi-card position-earnings" data-module="ERN / 03">
-        <div class="kpi-label">EARNINGS CAPACITY</div>
-        <div class="kpi-value">€{ytd_nii / 1000:.2f}bn</div>
-        <div class="executive-delta" style="color:#C8AAFF;">YTD NII · ROE proxy {ytd_roe_proxy:.1f}%</div>
-        <div class="executive-context">Net profit €{ytd_net_profit / 1000:.2f}bn · cost / income {ytd_cost_income:.1f}% · NIM {cert_current_nim:.2f}%</div>
-        <span class="micro-line"></span></div>"""
-    )
-
-with col4:
-    risk_delta_class = "position-status-watch" if stage2_mom_pp > 0 or stage3_mom_pp > 0 else "position-status-good"
-    render_html(
-        f"""<div class="kpi-card position-risk" data-module="CRD / 04">
-        <div class="kpi-label">ASSET QUALITY</div>
-        <div class="kpi-value">{current_stage2_pct:.1f}%</div>
-        <div class="executive-delta {risk_delta_class}">Stage 2 · {stage2_mom_pp:+.2f}pp vs {previous_month_label}</div>
-        <div class="executive-context">Stage 3 {current_stage3_pct:.1f}% ({stage3_mom_pp:+.2f}pp) · {current_credit_watch_count} current watch(es)</div>
-        <span class="micro-line"></span></div>"""
-    )
-
-render_html(
-    f"""
-    <div class="balance-footprint">
-        <div class="balance-footprint-item">
-            <div class="balance-footprint-label">Total assets</div>
-            <div class="balance-footprint-value">€{total_assets / 1000:.1f}bn</div>
-            <div class="balance-footprint-context">Bank scale / balance-sheet footprint</div>
-        </div>
-        <div class="balance-footprint-item">
-            <div class="balance-footprint-label">Risk-weighted assets</div>
-            <div class="balance-footprint-value">€{rwa / 1000:.1f}bn</div>
-            <div class="balance-footprint-context">RWA density {rwa_density_pct:.1f}% of total assets</div>
-        </div>
-        <div class="balance-footprint-item">
-            <div class="balance-footprint-label">Loan exposure</div>
-            <div class="balance-footprint-value">€{current_loans_m / 1000:.1f}bn</div>
-            <div class="balance-footprint-context">Current certified loan book</div>
-        </div>
-        <div class="balance-footprint-item">
-            <div class="balance-footprint-label">Deposits</div>
-            <div class="balance-footprint-value">€{current_deposits_m / 1000:.1f}bn</div>
-            <div class="balance-footprint-context">{total_deposit_30d_change_pct:+.2f}% / €{total_deposit_30d_change_m / 1000:+.2f}bn over 30D</div>
-        </div>
+domain_grid_markup = f"""
+    <div class="domain-grid">
+        {domain_cards_markup}
     </div>
     """
-)
+
+if not is_detail_workspace:
+    render_html(domain_grid_markup)
 
 
 # ============================================================
 # NAVIGATION
 # ============================================================
-
-selected_module = get_selected_module()
 
 module_metadata = {
     "home": (
@@ -5402,18 +6371,35 @@ def radial_url(module):
     return f"?module={destination}#{anchor}"
 
 
-render_html(
-    f"""
+if is_detail_workspace:
+    render_html(
+        f"""
+        <div class="detail-command-spacer" id="module-output" aria-hidden="true"></div>
+        <header class="detail-command-shell">
+            <a class="mini-jarvis" href="{radial_url('home')}" target="_self" aria-label="Return to Morning Command" title="Return to Morning Command">
+                <span class="mini-jarvis-ring" aria-hidden="true"></span>
+                <span class="mini-jarvis-core" aria-hidden="true"></span>
+            </a>
+            <div class="detail-command-copy">
+                <span class="detail-command-kicker">Morning Command / contextual workspace</span>
+                <strong class="detail-command-title">{html.escape(active_module_name)}</strong>
+                <span class="detail-command-subtitle">{html.escape(active_module_description)}</span>
+            </div>
+            <nav class="detail-command-nav" aria-label="Context workspaces">
+                <a class="detail-command-link {radial_active('strategy')}" href="{radial_url('strategy')}" target="_self">Strategy</a>
+                <a class="detail-command-link {radial_active('peers')}" href="{radial_url('peers')}" target="_self">Peers</a>
+                <a class="detail-command-link {radial_active('treasury')}" href="{radial_url('treasury')}" target="_self">Treasury</a>
+                <a class="detail-command-link {radial_active('news')}" href="{radial_url('news')}" target="_self">External</a>
+            </nav>
+        </header>
+        """
+    )
+
+
+primary_radial_markup = f"""
     <div class="integrated-system {selection_class}" id="radial-command">
         <div class="system-topline"><span></span><span><strong>CFO decision cockpit</strong> / {reporting_date}</span><span></span></div>
         <div class="system-grid">
-            <div class="cfo-change-panel">
-                <div class="cfo-panel-kicker">Change / reference period</div><div class="cfo-panel-title">What moved?</div>
-                <a class="change-row" href="{radial_url('brief')}" target="_self"><div class="change-row-head"><span class="change-name">Net interest margin</span><span class="change-value">{nim_mom_bps:+.1f} bps MoM</span></div><div class="change-detail">Current {cert_current_nim:.2f}% vs {safe_float(previous_cert_nim_row['nim_pct']):.2f}% in {previous_month_label} · {nim_signal_secondary}</div></a>
-                <a class="change-row" href="{radial_url('brief')}" target="_self"><div class="change-row-head"><span class="change-name">Deposits</span><span class="change-value">{total_deposit_30d_change_pct:+.2f}% vs 30D</span></div><div class="change-detail">€{total_deposit_30d_change_m / 1000:+.2f}bn over 30 days · {deposit_signal_secondary}</div></a>
-                <a class="change-row" href="{radial_url('brief')}" target="_self"><div class="change-row-head"><span class="change-name">Credit migration</span><span class="change-value">{('—' if credit_hotspot_stage2_delta_pp is None else f'{credit_hotspot_stage2_delta_pp:+.2f}pp vs 30D')}</span></div><div class="change-detail">{credit_signal_primary}</div></a>
-            </div>
-
             <div class="dial-viewport">
                 <div class="command-dial-html" role="navigation" aria-label="Interactive CFO command dial">
                     <span class="dial-grid-disc-html" aria-hidden="true"></span><span class="dial-crosshair-html" aria-hidden="true"></span><span class="dial-tick-shell-html" aria-hidden="true"></span><span class="dial-rotor-html rotor-outer" aria-hidden="true"></span><span class="dial-rotor-html rotor-inner" aria-hidden="true"></span><span class="dial-annulus-bed-html" aria-hidden="true"></span>
@@ -5429,39 +6415,16 @@ render_html(
                 </div>
             </div>
 
-            <div class="cfo-decision-panel">
-                <div class="cfo-panel-kicker">Decision path</div><div class="cfo-panel-title">Current → outlook → stress</div>
-
-                <div class="decision-lens-item">
-                    <div class="decision-lens-title">01 / Current performance</div>
-                    <div class="decision-lens-line"><span class="decision-lens-label">Actual</span><span class="decision-lens-copy">NIM {cert_current_nim:.2f}% · monthly NII €{cert_current_monthly_nii:,.0f}m.</span></div>
-                    <div class="decision-lens-line"><span class="decision-lens-label">Change</span><span class="decision-lens-copy">{nim_mom_bps:+.1f} bps NIM vs {previous_month_label} · deposits {total_deposit_30d_change_pct:+.2f}% over 30D.</span></div>
-                    <a class="copilot-action" href="?module=brief#module-output" target="_self">Open Morning Brief →</a>
-                </div>
-
-                <div class="decision-lens-item">
-                    <div class="decision-lens-title">02 / Forward baseline</div>
-                    <div class="decision-lens-line"><span class="decision-lens-label">December</span><span class="decision-lens-copy">NIM {horizon_year_end_nim:.2f}% · {horizon_change_bps:+.1f} bps vs August.</span></div>
-                    <div class="decision-lens-line"><span class="decision-lens-label">FY NII</span><span class="decision-lens-copy">€{horizon_full_year_nii_m / 1000:.2f}bn mechanical run-rate; not an official management forecast.</span></div>
-                    <a class="copilot-action" href="?module=horizon#module-output" target="_self">Open Horizon →</a>
-                </div>
-
-                <div class="decision-lens-item">
-                    <div class="decision-lens-title">03 / Stress preview</div>
-                    <div class="decision-lens-line"><span class="decision-lens-label">Assumption</span><span class="decision-lens-copy">ECB −50 bps · no deposit-volume shock · 365 days.</span></div>
-                    <div class="decision-lens-line"><span class="decision-lens-label">Impact</span><span class="decision-lens-copy">NIM {home_scenario_nim_impact_bps:+.1f} bps · NII €{home_scenario_nii_impact_m:+,.0f}m over horizon.</span></div>
-                    <a class="copilot-action" href="?module=scenario#module-output" target="_self">Open What-If Engine →</a>
-                </div>
-            </div>
         </div>
         <div class="system-bottom-rail"><span>Current view / {active_module_name}</span><a class="system-reset {'is-home' if selected_module == 'home' else ''}" href="?module=home#radial-command" target="_self">◎ Overview</a><span>Select a vector to investigate</span></div>
     </div>
     """
-)
+
+if not is_detail_workspace:
+    render_html(primary_radial_markup)
 
 
-render_html(
-    f"""
+intelligence_dock_markup = f"""
     <div class="intelligence-dock">
         <div class="dock-kicker">Context beyond the core financial engine</div>
         <div class="dock-actions">
@@ -5472,7 +6435,9 @@ render_html(
         </div>
     </div>
     """
-)
+
+if not is_detail_workspace:
+    render_html(intelligence_dock_markup)
 
 
 if selected_module == "home":
@@ -5486,7 +6451,7 @@ if selected_module == "home":
         """
     )
 
-else:
+elif not is_detail_workspace:
 
     render_html(
         f"""
