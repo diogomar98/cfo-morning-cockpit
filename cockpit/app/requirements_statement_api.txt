@@ -1,0 +1,5 @@
+streamlit
+pandas
+altair
+databricks-sdk
+databricks-sql-connector[kernel]
