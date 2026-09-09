@@ -261,7 +261,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip the detailed bank_daily_signals reconciliation validation.",
     )
-    return parser.parse_args()
+    # Databricks interactive Python-file sessions inject IPython/kernel arguments
+    # (for example: -f <connection.json>). Ignore those platform arguments
+    # while still honoring the CFO pipeline arguments defined above.
+    args, _unknown = parser.parse_known_args()
+    return args
 
 
 if __name__ == "__main__":
