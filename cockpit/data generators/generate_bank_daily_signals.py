@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import calendar
 import csv
 from collections import defaultdict
@@ -675,8 +676,9 @@ def validate(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate synthetic daily bank signals from bank_history.csv")
-    parser.add_argument("--input", default="data/bank_history.csv", help="Path to bank_history.csv")
-    parser.add_argument("--output", default="data/bank_daily_signals.csv", help="Output CSV path")
+    default_dir = Path(os.getenv("CFO_OUTPUT_DIR", "data"))
+    parser.add_argument("--input", default=str(default_dir / "bank_history.csv"), help="Path to bank_history.csv")
+    parser.add_argument("--output", default=str(default_dir / "bank_daily_signals.csv"), help="Output CSV path")
     parser.add_argument("--start", default="2026-01-01")
     parser.add_argument("--end", default="2026-08-31")
     parser.add_argument("--seed", type=int, default=43)

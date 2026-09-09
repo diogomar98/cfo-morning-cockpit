@@ -1,4 +1,6 @@
 from pathlib import Path
+import argparse
+import os
 import numpy as np
 import pandas as pd
 
@@ -404,7 +406,20 @@ def generate_treasury_datasets(
 
 
 if __name__ == "__main__":
-    portfolio, scenarios, hedges = generate_treasury_datasets()
+    default_dir = os.getenv("CFO_OUTPUT_DIR", "data")
+    parser = argparse.ArgumentParser(description="Generate Treasury portfolio and hedge datasets.")
+    parser.add_argument("--bank-history-path", default=str(Path(default_dir) / "bank_history.csv"))
+    parser.add_argument("--output-dir", default=default_dir)
+    parser.add_argument("--seed", type=int, default=73)
+    parser.add_argument("--positions", type=int, default=52)
+    args = parser.parse_args()
+
+    portfolio, scenarios, hedges = generate_treasury_datasets(
+        bank_history_path=args.bank_history_path,
+        output_dir=args.output_dir,
+        seed=args.seed,
+        n_positions=args.positions,
+    )
     print(f"Created treasury_portfolio.csv with {len(portfolio)} positions.")
     print(f"Created treasury_scenario_impacts.csv with {len(scenarios)} rows.")
     print(f"Created treasury_hedge_options.csv with {len(hedges)} options.")

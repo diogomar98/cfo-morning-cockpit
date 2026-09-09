@@ -30,22 +30,21 @@ Generation order:
 
 from pathlib import Path
 import argparse
+import os
 import sys
 
-# Make sibling generator files importable.
-# Databricks Python-file tasks may execute the source through an IPython wrapper,
-# in which case __file__ is not defined. Use __file__ when available and fall
-# back to the known Workspace project path for this prototype.
+# Make sibling generator files importable without tying the code to one user/workspace.
+# When imported/run as a normal Python file, __file__ resolves the repository folder.
+# CFO_GENERATOR_DIR is only needed for unusual execution wrappers where __file__ is absent.
 try:
     SCRIPT_DIR = Path(__file__).resolve().parent
 except NameError:
-    SCRIPT_DIR = Path(
-        "/Workspace/Users/diogomar98@gmail.com/"
-        "CFO_Cockpit/data_generators"
-    )
+    SCRIPT_DIR = Path(os.getenv("CFO_GENERATOR_DIR", Path.cwd())).resolve()
 
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
+
+DEFAULT_OUTPUT_DIR = os.getenv("CFO_OUTPUT_DIR", "data")
 
 from generate_bank_history import generate_bank_history
 from generate_bank_daily_signals import (
@@ -244,8 +243,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output-dir",
-        default="data",
-        help="Folder in which all CSV files will be written.",
+        default=DEFAULT_OUTPUT_DIR,
+        help=(
+            "Folder in which all CSV files will be written. "
+            "Defaults to CFO_OUTPUT_DIR when set, otherwise ./data."
+        ),
     )
     parser.add_argument("--history-months", type=int, default=48)
     parser.add_argument("--history-seed", type=int, default=42)

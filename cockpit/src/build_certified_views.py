@@ -4,7 +4,7 @@ from __future__ import annotations
 Build the certified / curated CFO layer on top of the raw Delta tables.
 
 Source schema:
-    workspace.cfo_cockpit
+    <catalog>.<schema>
 
 Design principle:
     Raw data -> deterministic finance logic -> certified CFO views -> Genie/App.
@@ -15,10 +15,11 @@ across dates.
 """
 
 import argparse
+import os
 from pyspark.sql import SparkSession
 
-DEFAULT_CATALOG = "workspace"
-DEFAULT_SCHEMA = "cfo_cockpit"
+DEFAULT_CATALOG = os.getenv("CFO_DATA_CATALOG", "workspace")
+DEFAULT_SCHEMA = os.getenv("CFO_DATA_SCHEMA", "cfo_cockpit")
 
 
 def build_certified_views(

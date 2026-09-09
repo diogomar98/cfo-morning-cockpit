@@ -15,18 +15,19 @@ Hard failures raise RuntimeError and fail the Databricks task.
 Warnings are printed but do not fail the pipeline.
 
 Target schema:
-    workspace.cfo_cockpit
+    <catalog>.<schema>
 """
 
 import argparse
+import os
 from dataclasses import dataclass
 from typing import List
 
 from pyspark.sql import SparkSession
 
 
-DEFAULT_CATALOG = "workspace"
-DEFAULT_SCHEMA = "cfo_cockpit"
+DEFAULT_CATALOG = os.getenv("CFO_DATA_CATALOG", "workspace")
+DEFAULT_SCHEMA = os.getenv("CFO_DATA_SCHEMA", "cfo_cockpit")
 
 
 @dataclass
@@ -99,8 +100,38 @@ def validate_certified_data(
     print()
 
     # ------------------------------------------------------------------
-    # 1. Required certified views exist
+    # 1. Required raw tables and certified views exist
     # ------------------------------------------------------------------
+    required_raw_tables = [
+        "raw_bank_history",
+        "raw_bank_daily_signals",
+        "raw_news_signals",
+        "raw_news_geo_impact",
+        "raw_treasury_portfolio",
+        "raw_treasury_scenario_impacts",
+        "raw_treasury_hedge_options",
+        "raw_peer_financials",
+        "raw_peer_positioning",
+        "raw_peer_benchmarks",
+        "raw_strategic_radar",
+        "raw_strategic_capability_map",
+    ]
+
+    for table_name in required_raw_tables:
+        full_name = f"{q}.{table_name}"
+        exists = spark.catalog.tableExists(full_name)
+        expect_true(
+            f"raw_exists::{table_name}",
+            exists,
+            f"{full_name} exists",
+        )
+
+    if failures:
+        raise RuntimeError(
+            "Raw table existence checks failed. "
+            "Run load_raw_data before building/validating the certified layer."
+        )
+
     required_views = [
         "cfo_financial_history",
         "cfo_current_position",
@@ -357,11 +388,191 @@ def validate_certified_data(
 
     print()
     print("-" * 82)
+    print("COUNTRY / BUSINESS-COUNTRY DRILLDOWNS")
+    print("-" * 82)
+
+    # ------------------------------------------------------------------
+    # 4. Country and business-country certified drilldowns
+    # ------------------------------------------------------------------
+    country_duplicate_groups = int(
+        scalar(
+            f"""
+            SELECT COUNT(*)
+            FROM (
+                SELECT date, country, COUNT(*) AS n
+                FROM {q}.cfo_daily_country
+                GROUP BY date, country
+                HAVING COUNT(*) <> 1
+            ) x
+            """
+        )
+    )
+    expect_true(
+        "daily_country_unique_key",
+        country_duplicate_groups == 0,
+        f"duplicate/non-unique date-country groups={country_duplicate_groups}",
+    )
+
+    latest_country_rows = int(
+        scalar(
+            f"""
+            SELECT COUNT(*)
+            FROM {q}.cfo_daily_country
+            WHERE date = (SELECT MAX(date) FROM {q}.cfo_daily_country)
+            """
+        )
+    )
+    expect_true(
+        "daily_country_latest_four_countries",
+        latest_country_rows == 4,
+        f"latest rows={latest_country_rows}, expected 4 countries",
+    )
+
+    country_bank_recon = spark.sql(
+        f"""
+        WITH latest AS (
+            SELECT MAX(date) AS d FROM {q}.cfo_daily_bank
+        ),
+        bank AS (
+            SELECT
+                interest_earning_assets_m,
+                deposit_balance_m,
+                daily_nii_m,
+                rwa_m
+            FROM {q}.cfo_daily_bank
+            CROSS JOIN latest
+            WHERE date = latest.d
+        ),
+        country AS (
+            SELECT
+                SUM(interest_earning_assets_m) AS interest_earning_assets_m,
+                SUM(deposit_balance_m) AS deposit_balance_m,
+                SUM(daily_nii_m) AS daily_nii_m,
+                SUM(rwa_m) AS rwa_m
+            FROM {q}.cfo_daily_country
+            CROSS JOIN latest
+            WHERE date = latest.d
+        )
+        SELECT
+            ABS(bank.interest_earning_assets_m - country.interest_earning_assets_m) AS assets_diff,
+            ABS(bank.deposit_balance_m - country.deposit_balance_m) AS deposits_diff,
+            ABS(bank.daily_nii_m - country.daily_nii_m) AS nii_diff,
+            ABS(bank.rwa_m - country.rwa_m) AS rwa_diff
+        FROM bank CROSS JOIN country
+        """
+    ).first()
+
+    max_country_bank_diff = max(float(v or 0.0) for v in country_bank_recon)
+    expect_true(
+        "daily_country_reconciles_to_bank",
+        max_country_bank_diff < 0.01,
+        f"max latest-date reconciliation difference = {max_country_bank_diff:,.6f}",
+    )
+
+    business_country_duplicate_groups = int(
+        scalar(
+            f"""
+            SELECT COUNT(*)
+            FROM (
+                SELECT date, country, business_line, COUNT(*) AS n
+                FROM {q}.cfo_daily_business_country
+                GROUP BY date, country, business_line
+                HAVING COUNT(*) <> 1
+            ) x
+            """
+        )
+    )
+    expect_true(
+        "daily_business_country_unique_key",
+        business_country_duplicate_groups == 0,
+        f"duplicate/non-unique date-country-business groups={business_country_duplicate_groups}",
+    )
+
+    latest_business_country_rows = int(
+        scalar(
+            f"""
+            SELECT COUNT(*)
+            FROM {q}.cfo_daily_business_country
+            WHERE date = (SELECT MAX(date) FROM {q}.cfo_daily_business_country)
+            """
+        )
+    )
+    expect_true(
+        "daily_business_country_latest_twelve_segments",
+        latest_business_country_rows == 12,
+        f"latest rows={latest_business_country_rows}, expected 12 country/business combinations",
+    )
+
+    business_country_country_diff = scalar(
+        f"""
+        WITH latest AS (
+            SELECT MAX(date) AS d FROM {q}.cfo_daily_country
+        ),
+        bc AS (
+            SELECT
+                country,
+                SUM(interest_earning_assets_m) AS assets_m,
+                SUM(deposit_balance_m) AS deposits_m,
+                SUM(daily_nii_m) AS nii_m,
+                SUM(rwa_m) AS rwa_m
+            FROM {q}.cfo_daily_business_country
+            CROSS JOIN latest
+            WHERE date = latest.d
+            GROUP BY country
+        ),
+        c AS (
+            SELECT
+                country,
+                interest_earning_assets_m AS assets_m,
+                deposit_balance_m AS deposits_m,
+                daily_nii_m AS nii_m,
+                rwa_m
+            FROM {q}.cfo_daily_country
+            CROSS JOIN latest
+            WHERE date = latest.d
+        )
+        SELECT MAX(GREATEST(
+            ABS(bc.assets_m - c.assets_m),
+            ABS(bc.deposits_m - c.deposits_m),
+            ABS(bc.nii_m - c.nii_m),
+            ABS(bc.rwa_m - c.rwa_m)
+        ))
+        FROM bc INNER JOIN c USING (country)
+        """
+    )
+    expect_true(
+        "daily_business_country_reconciles_to_country",
+        float(business_country_country_diff or 0.0) < 0.01,
+        f"max latest-date country reconciliation difference = {float(business_country_country_diff or 0.0):,.6f}",
+    )
+
+    invalid_drilldown_stage_rows = int(
+        scalar(
+            f"""
+            SELECT COUNT(*) FROM (
+                SELECT weighted_stage_2_share_pct AS s2, weighted_stage_3_share_pct AS s3
+                FROM {q}.cfo_daily_country
+                UNION ALL
+                SELECT weighted_stage_2_share_pct AS s2, weighted_stage_3_share_pct AS s3
+                FROM {q}.cfo_daily_business_country
+            ) x
+            WHERE s2 < 0 OR s2 > 100 OR s3 < 0 OR s3 > 100
+            """
+        )
+    )
+    expect_true(
+        "daily_drilldown_stage_shares_valid",
+        invalid_drilldown_stage_rows == 0,
+        f"invalid stage-share rows={invalid_drilldown_stage_rows}",
+    )
+
+    print()
+    print("-" * 82)
     print("CREDIT / DEPOSIT SIGNALS")
     print("-" * 82)
 
     # ------------------------------------------------------------------
-    # 4. Deposit / credit signal quality
+    # 5. Deposit / credit signal quality
     # ------------------------------------------------------------------
     deposit_rows = int(
         scalar(f"SELECT COUNT(*) FROM {q}.cfo_deposit_signals")
@@ -424,7 +635,7 @@ def validate_certified_data(
     print("-" * 82)
 
     # ------------------------------------------------------------------
-    # 5. News / map quality
+    # 6. News / map quality
     # ------------------------------------------------------------------
     news_count = int(
         scalar(
@@ -490,7 +701,7 @@ def validate_certified_data(
     print("-" * 82)
 
     # ------------------------------------------------------------------
-    # 6. Treasury reconciliation and scenario completeness
+    # 7. Treasury reconciliation and scenario completeness
     # ------------------------------------------------------------------
     treasury_summary_count = int(
         scalar(f"SELECT COUNT(*) FROM {q}.cfo_treasury_summary")
@@ -567,7 +778,7 @@ def validate_certified_data(
     print("-" * 82)
 
     # ------------------------------------------------------------------
-    # 7. Peer completeness
+    # 8. Peer completeness
     # ------------------------------------------------------------------
     peer_count = int(
         scalar(f"SELECT COUNT(*) FROM {q}.cfo_peer_benchmark")
@@ -603,7 +814,7 @@ def validate_certified_data(
     )
 
     # ------------------------------------------------------------------
-    # 8. Strategic radar consistency
+    # 9. Strategic radar consistency
     # ------------------------------------------------------------------
     radar_count = int(
         scalar(f"SELECT COUNT(*) FROM {q}.cfo_strategic_radar")

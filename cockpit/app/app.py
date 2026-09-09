@@ -45,6 +45,7 @@ VALID_MODULES = {
     "treasury",
     "peers",
     "strategy",
+    "news",
     "copilot",
 }
 
@@ -112,10 +113,29 @@ def get_query_value(key, default=""):
 
 cfg = Config()
 
-WAREHOUSE_HTTP_PATH = "/sql/1.0/warehouses/b4e46e2c640b87c1"
+# Environment-specific resources are configured outside source control.
+# Supported options:
+#   DATABRICKS_WAREHOUSE_HTTP_PATH=/sql/1.0/warehouses/<id>
+#   or DATABRICKS_WAREHOUSE_ID=<id>
+WAREHOUSE_HTTP_PATH = os.getenv("DATABRICKS_WAREHOUSE_HTTP_PATH")
+if not WAREHOUSE_HTTP_PATH:
+    warehouse_id = os.getenv("DATABRICKS_WAREHOUSE_ID") or os.getenv("CFO_WAREHOUSE_ID")
+    if warehouse_id:
+        WAREHOUSE_HTTP_PATH = f"/sql/1.0/warehouses/{warehouse_id}"
+
+# Data namespace is configurable so the same source can run in personal and ABN environments.
+DATA_CATALOG = os.getenv("CFO_DATA_CATALOG", "workspace")
+DATA_SCHEMA = os.getenv("CFO_DATA_SCHEMA", "cfo_cockpit")
+DATA_NAMESPACE = f"{DATA_CATALOG}.{DATA_SCHEMA}"
 
 
 def get_connection():
+
+    if not WAREHOUSE_HTTP_PATH:
+        raise RuntimeError(
+            "No SQL warehouse configured. Set DATABRICKS_WAREHOUSE_HTTP_PATH "
+            "or DATABRICKS_WAREHOUSE_ID/CFO_WAREHOUSE_ID in the App environment."
+        )
 
     server_hostname = cfg.host
 
@@ -135,6 +155,10 @@ def get_connection():
 
 def run_query(query: str) -> pd.DataFrame:
 
+    # Keep the SQL definitions readable while allowing the app to switch
+    # between schemas via CFO_DATA_SCHEMA / CFO_DATA_CATALOG.
+    query = query.replace("workspace.cfo_cockpit", DATA_NAMESPACE)
+
     with get_connection() as connection:
 
         with connection.cursor() as cursor:
@@ -148,20 +172,14 @@ def run_query(query: str) -> pd.DataFrame:
 # GENIE CFO COPILOT
 # ============================================================
 
-# Preferred: define GENIE_SPACE_ID in app.yaml using:
-#
+# Configure the Genie Agent/Space ID through the App environment.
+# Keep environment-specific resource IDs out of GitHub source code.
+# Example app.yaml pattern:
 # env:
 #   - name: GENIE_SPACE_ID
 #     valueFrom: genie-space
-#
-# The fallback below is the non-secret Agent / Space ID visible
-# in Databricks. It lets the hackathon app work immediately even
-# before app.yaml is updated.
 
-GENIE_SPACE_ID = os.getenv(
-    "GENIE_SPACE_ID",
-    "01f19d6fd50d16b09d8d1f86ae580708",
-)
+GENIE_SPACE_ID = os.getenv("GENIE_SPACE_ID")
 
 workspace_client = WorkspaceClient(config=cfg)
 
@@ -311,6 +329,12 @@ def ask_cfo_genie(question: str):
     Streamlit-session conversation.
     """
 
+    if not GENIE_SPACE_ID:
+        raise RuntimeError(
+            "GENIE_SPACE_ID is not configured. Add the Genie Agent as an App resource "
+            "and expose its ID through the GENIE_SPACE_ID environment variable."
+        )
+
     conversation_id = st.session_state.get(
         "cfo_genie_conversation_id"
     )
@@ -382,33 +406,6 @@ def build_copilot_request(question: str) -> str:
 
 
 # ============================================================
-# DYNAMIC SCENARIO FUNCTION
-# ============================================================
-
-def run_scenario(
-    ecb_shock_bps: int,
-    corporate_deposit_shock_pct: float,
-    horizon_days: int,
-    replacement_funding_rate_pct: float = 3.25,
-) -> pd.DataFrame:
-
-    # Inputs come exclusively from numeric Streamlit controls.
-    # No user-provided SQL strings are passed into the query.
-
-    query = f"""
-        SELECT *
-        FROM workspace.cfo_cockpit.cfo_run_scenario(
-            {int(ecb_shock_bps)},
-            {float(corporate_deposit_shock_pct)},
-            {int(horizon_days)},
-            {float(replacement_funding_rate_pct)}
-        )
-    """
-
-    return run_query(query)
-
-
-# ============================================================
 # LOAD LIVE DATA
 # ============================================================
 
@@ -426,12 +423,15 @@ news_recent_df = None
 geo_news_df = None
 daily_latest_df = None
 daily_recent_df = None
+daily_country_df = None
+daily_business_country_df = None
 treasury_summary_df = None
 treasury_rate50_df = None
 treasury_snapshot_history_df = None
 treasury_scenarios_df = None
 hedge_options_df = None
 peer_benchmark_df = None
+peer_benchmarks_df = None
 strategic_radar_df = None
 capability_gaps_df = None
 
@@ -700,6 +700,59 @@ try:
     )
 
     # --------------------------------------------------------
+    # CERTIFIED COUNTRY / BUSINESS-COUNTRY DRILLDOWNS
+    # Retained as governed sources for geographic and business-line analysis.
+    # --------------------------------------------------------
+
+    daily_country_df = run_query(
+        """
+        SELECT
+            date,
+            country,
+            interest_earning_assets_m,
+            deposit_balance_m,
+            daily_interest_income_m,
+            daily_interest_expense_m,
+            daily_nii_m,
+            weighted_loan_rate_pct,
+            weighted_deposit_rate_pct,
+            annualised_daily_nim_pct,
+            rwa_m,
+            weighted_stage_2_share_pct,
+            weighted_stage_3_share_pct,
+            has_anomaly
+        FROM workspace.cfo_cockpit.cfo_daily_country
+        WHERE date = (
+            SELECT MAX(date)
+            FROM workspace.cfo_cockpit.cfo_daily_country
+        )
+        ORDER BY country
+        """
+    )
+
+    daily_business_country_df = run_query(
+        """
+        SELECT
+            date,
+            country,
+            business_line,
+            interest_earning_assets_m,
+            deposit_balance_m,
+            daily_nii_m,
+            rwa_m,
+            weighted_stage_2_share_pct,
+            weighted_stage_3_share_pct,
+            has_anomaly
+        FROM workspace.cfo_cockpit.cfo_daily_business_country
+        WHERE date = (
+            SELECT MAX(date)
+            FROM workspace.cfo_cockpit.cfo_daily_business_country
+        )
+        ORDER BY country, business_line
+        """
+    )
+
+    # --------------------------------------------------------
     # CERTIFIED TREASURY PULSE
     # Used as a secondary intelligence readout around the radial core.
     # --------------------------------------------------------
@@ -810,6 +863,23 @@ try:
             source_url
         FROM workspace.cfo_cockpit.cfo_peer_benchmark
         ORDER BY reported_return_pct DESC
+        """
+    )
+
+    peer_benchmarks_df = run_query(
+        """
+        SELECT
+            metric,
+            metric_label,
+            peer_count,
+            peer_min,
+            peer_q1,
+            peer_median,
+            peer_q3,
+            peer_max,
+            benchmark_note
+        FROM workspace.cfo_cockpit.cfo_peer_benchmarks
+        ORDER BY metric
         """
     )
 
@@ -1979,8 +2049,8 @@ render_html(
                 92.4% 23.5%
             );
             background:
-                repeating-radial-gradient(circle, transparent 0 16px, rgba(113,225,248,0.075) 17px, transparent 18px 27px),
-                linear-gradient(180deg, rgba(11,126,158,0.95), rgba(4,38,52,0.98));
+                repeating-radial-gradient(circle, transparent 0 16px, rgba(82,231,255,0.085) 17px, transparent 18px 27px),
+                linear-gradient(180deg, rgba(7,137,169,0.98), rgba(3,42,55,0.98));
         }
 
         .css-sector-horizon {
@@ -1997,8 +2067,8 @@ render_html(
                 5.9% 26.5%
             );
             background:
-                repeating-radial-gradient(circle, transparent 0 16px, rgba(99,195,255,0.075) 17px, transparent 18px 27px),
-                linear-gradient(135deg, rgba(5,48,80,0.98), rgba(7,104,133,0.90));
+                repeating-radial-gradient(circle, transparent 0 16px, rgba(184,140,255,0.10) 17px, transparent 18px 27px),
+                linear-gradient(135deg, rgba(53,31,92,0.98), rgba(20,54,88,0.96));
         }
 
         .css-sector-scenario {
@@ -2015,8 +2085,8 @@ render_html(
                 51.7% 100%
             );
             background:
-                repeating-radial-gradient(circle, transparent 0 16px, rgba(188,155,255,0.08) 17px, transparent 18px 27px),
-                linear-gradient(225deg, rgba(51,31,91,0.97), rgba(7,77,101,0.94));
+                repeating-radial-gradient(circle, transparent 0 16px, rgba(255,203,102,0.10) 17px, transparent 18px 27px),
+                linear-gradient(225deg, rgba(115,67,20,0.98), rgba(52,43,34,0.96));
         }
 
         .css-sector:hover,
@@ -2111,6 +2181,10 @@ render_html(
             font-weight: 750;
             letter-spacing: 0.055em;
         }
+
+        .sector-label-brief .sector-metric-html { color:#63EBFF; }
+        .sector-label-horizon .sector-metric-html { color:#C8AAFF; }
+        .sector-label-scenario .sector-metric-html { color:#FFD37C; }
 
         .sector-sub-html {
             color: #477887;
@@ -3487,9 +3561,9 @@ render_html(
 
         .dock-actions {
             display:grid;
-            grid-template-columns:repeat(3,minmax(0,1fr));
+            grid-template-columns:repeat(4,minmax(0,1fr));
             gap:0.75rem;
-            max-width:720px;
+            max-width:980px;
             margin:0.68rem auto 0;
         }
 
@@ -3520,6 +3594,70 @@ render_html(
             border-color:#58E4FF;
             background:linear-gradient(145deg,rgba(12,80,99,0.44),rgba(26,28,61,0.32));
             box-shadow:0 0 18px rgba(82,231,255,0.11),inset 0 0 18px rgba(82,231,255,0.04);
+        }
+
+        .dock-strategy { border-color:rgba(184,140,255,.28); }
+        .dock-strategy .dock-icon { color:#C8AAFF; border-color:rgba(184,140,255,.38); }
+        .dock-peers { border-color:rgba(82,231,255,.24); }
+        .dock-peers .dock-icon { color:#63E8FF; }
+        .dock-treasury { border-color:rgba(255,203,102,.28); }
+        .dock-treasury .dock-icon { color:#FFD37C; border-color:rgba(255,203,102,.38); }
+        .dock-news { border-color:rgba(255,93,122,.25); }
+        .dock-news .dock-icon { color:#FF8196; border-color:rgba(255,93,122,.36); }
+
+        .position-capital::before {
+            background:linear-gradient(90deg,var(--green),transparent) !important;
+            box-shadow:0 0 14px rgba(66,245,167,.50) !important;
+        }
+        .position-liquidity::before {
+            background:linear-gradient(90deg,var(--cyan),transparent) !important;
+            box-shadow:0 0 14px rgba(82,231,255,.48) !important;
+        }
+        .position-earnings::before {
+            background:linear-gradient(90deg,var(--violet),transparent) !important;
+            box-shadow:0 0 14px rgba(184,140,255,.45) !important;
+        }
+        .position-risk::before {
+            background:linear-gradient(90deg,var(--amber),transparent) !important;
+            box-shadow:0 0 14px rgba(255,203,102,.46) !important;
+        }
+
+        .position-status-good { color:var(--green); }
+        .position-status-neutral { color:var(--cyan-soft); }
+        .position-status-watch { color:var(--amber); }
+
+        .balance-footprint {
+            display:grid;
+            grid-template-columns:repeat(4,minmax(0,1fr));
+            gap:.62rem;
+            margin:.15rem 0 1.1rem;
+        }
+        .balance-footprint-item {
+            padding:.72rem .85rem;
+            background:rgba(82,231,255,.022);
+            border:1px solid rgba(82,231,255,.10);
+        }
+        .balance-footprint-label {
+            color:#638996;
+            font:750 .55rem "Cascadia Mono",Consolas,monospace;
+            letter-spacing:.11em;
+            text-transform:uppercase;
+        }
+        .balance-footprint-value {
+            margin-top:.25rem;
+            color:#E9FBFF;
+            font:680 1.05rem "Cascadia Mono",Consolas,monospace;
+        }
+        .balance-footprint-context {
+            margin-top:.18rem;
+            color:#557E8D;
+            font-size:.64rem;
+            line-height:1.35;
+        }
+
+        @media (max-width: 1000px) {
+            .dock-actions,
+            .balance-footprint { grid-template-columns:repeat(2,minmax(0,1fr)); }
         }
 
         .dock-icon {
@@ -3691,7 +3829,7 @@ render_html(
         .decision-strip-item strong { display:block; color:#e9fbff; font-size:.83rem; margin:.20rem 0 .28rem; }
         .decision-strip-item span:last-child { color:#789eab; font-size:.68rem; line-height:1.42; }
         .dock-metric { line-height:1.35; }
-        .intelligence-dock { max-width:920px; margin-left:auto; margin-right:auto; }
+        .intelligence-dock { max-width:1120px; margin-left:auto; margin-right:auto; }
         .dock-actions { gap:.85rem; }
         .dock-action { padding:1rem 1.1rem; min-height:78px; }
 
@@ -3879,9 +4017,12 @@ ytd_nii = safe_float(current_position["ytd_nii_m"])
 current_loans_m = safe_float(current_position["loans_m"])
 current_deposits_m = safe_float(current_position["deposits_m"])
 total_assets = safe_float(current_position["total_assets_m"])
+rwa = safe_float(current_position["rwa_m"])
 cet1_capital = safe_float(current_position["cet1_capital_m"])
 hqla = safe_float(current_position["hqla_m"])
+ytd_net_profit = safe_float(current_position["ytd_net_profit_m"])
 months_observed = int(safe_float(current_position["months_observed"], 0))
+rwa_density_pct = (rwa / total_assets * 100.0) if total_assets else 0.0
 
 # Genuine historical change context.
 financial_history_df["date"] = pd.to_datetime(financial_history_df["date"])
@@ -3893,6 +4034,10 @@ previous_history = financial_history_df.iloc[-2] if len(financial_history_df) >=
 previous_month_label = pd.to_datetime(previous_history["date"]).strftime("%b")
 cet1_mom_pp = cet1_ratio - safe_float(previous_history["cet1_ratio_pct"])
 lcr_mom_pp = lcr_ratio - safe_float(previous_history["lcr_pct"])
+current_stage2_pct = safe_float(latest_history["stage_2_share_pct"])
+current_stage3_pct = safe_float(latest_history["stage_3_share_pct"])
+stage2_mom_pp = current_stage2_pct - safe_float(previous_history["stage_2_share_pct"])
+stage3_mom_pp = current_stage3_pct - safe_float(previous_history["stage_3_share_pct"])
 
 def ytd_metrics_through(history_df, cutoff_date):
     cutoff_date = pd.to_datetime(cutoff_date)
@@ -4545,6 +4690,18 @@ def calculate_certified_scenario(
     }
 
 
+# A single deterministic preview is shown on the home radial so the CFO can
+# see the current -> outlook -> stress storyline without opening the full module.
+home_scenario_preview = calculate_certified_scenario(
+    ecb_shock_bps=-50,
+    deposit_balance_shock_pct=0.0,
+    horizon_days=365,
+)
+home_scenario_nim_impact_bps = safe_float(home_scenario_preview["nim_impact_bps"])
+home_scenario_nii_impact_m = safe_float(home_scenario_preview["horizon_nii_impact_m"])
+home_scenario_nim_pct = safe_float(home_scenario_preview["scenario_nim_pct"])
+
+
 # ============================================================
 # STATUS HELPERS
 # ============================================================
@@ -5071,21 +5228,95 @@ render_html(
 
 
 # ============================================================
-# EXECUTIVE SNAPSHOT — CURRENT + CHANGE + CONTEXT
+# CFO POSITION — COMFORT FIRST, THEN SCALE / RISK
 # ============================================================
 
-render_html(f"""<div class="attention-line"><div class="attention-copy">Good morning. <strong>{executive_change_count}</strong> changes are summarized for review.</div><div class="sync-copy">As of {reporting_date}</div></div>""")
+render_html(
+    f"""
+    <div class="section-heading">
+        <div>
+            <div class="module-code">Position / current bank condition</div>
+            <div class="section-title">Can the CFO be comfortable with the bank today?</div>
+            <div class="section-subtitle">
+                Capital, liquidity, earnings and asset quality first. Balance-sheet scale and risk
+                sit directly underneath so the position is visible without turning the landing page
+                into a regulatory report.
+            </div>
+        </div>
+        <div class="sync-copy">As of {reporting_date}</div>
+    </div>
+    """
+)
 
 col1, col2, col3, col4 = st.columns(4)
+
 with col1:
-    render_html(f"""<div class="kpi-card" data-module="CAP / 01"><div class="kpi-label">CET1 RATIO</div><div class="kpi-value">{cet1_ratio:.1f}%</div><div class="executive-delta">{arrow_delta(cet1_mom_pp)} vs {previous_month_label}</div><div class="executive-context">{cet1_peer_gap_pp:+.1f}pp vs peer median · €{cet1_capital / 1000:.1f}bn CET1</div><span class="micro-line"></span></div>""")
+    render_html(
+        f"""<div class="kpi-card position-capital" data-module="CAP / 01">
+        <div class="kpi-label">CAPITAL RESILIENCE</div>
+        <div class="kpi-value">{cet1_ratio:.1f}%</div>
+        <div class="executive-delta position-status-good">CET1 · {arrow_delta(cet1_mom_pp)} vs {previous_month_label}</div>
+        <div class="executive-context">Total capital {total_capital_ratio:.1f}% · €{cet1_capital / 1000:.1f}bn CET1 · RWA €{rwa / 1000:.1f}bn</div>
+        <span class="micro-line"></span></div>"""
+    )
+
 with col2:
-    render_html(f"""<div class="kpi-card" data-module="LIQ / 02"><div class="kpi-label">LIQUIDITY COVERAGE</div><div class="kpi-value">{lcr_ratio:.1f}%</div><div class="executive-delta">{arrow_delta(lcr_mom_pp)} vs {previous_month_label}</div><div class="executive-context">HQLA €{hqla / 1000:.1f}bn · L/D {loan_to_deposit_ratio:.1f}%</div><span class="micro-line"></span></div>""")
+    render_html(
+        f"""<div class="kpi-card position-liquidity" data-module="LIQ / 02">
+        <div class="kpi-label">LIQUIDITY & FUNDING</div>
+        <div class="kpi-value">{lcr_ratio:.1f}%</div>
+        <div class="executive-delta position-status-neutral">LCR · {arrow_delta(lcr_mom_pp)} vs {previous_month_label}</div>
+        <div class="executive-context">HQLA €{hqla / 1000:.1f}bn · L/D {loan_to_deposit_ratio:.1f}% · deposits €{current_deposits_m / 1000:.1f}bn</div>
+        <span class="micro-line"></span></div>"""
+    )
+
 with col3:
-    render_html(f"""<div class="kpi-card" data-module="RET / 03"><div class="kpi-label">ANNUALISED YTD ROE PROXY</div><div class="kpi-value">{ytd_roe_proxy:.1f}%</div><div class="executive-delta">{arrow_delta(ytd_roe_delta_pp)} vs {previous_month_label}</div><div class="executive-context">{roe_peer_gap_pp:+.1f}pp vs peer median · directional comparison</div><span class="micro-line"></span></div>""")
+    render_html(
+        f"""<div class="kpi-card position-earnings" data-module="ERN / 03">
+        <div class="kpi-label">EARNINGS CAPACITY</div>
+        <div class="kpi-value">€{ytd_nii / 1000:.2f}bn</div>
+        <div class="executive-delta" style="color:#C8AAFF;">YTD NII · ROE proxy {ytd_roe_proxy:.1f}%</div>
+        <div class="executive-context">Net profit €{ytd_net_profit / 1000:.2f}bn · cost / income {ytd_cost_income:.1f}% · NIM {cert_current_nim:.2f}%</div>
+        <span class="micro-line"></span></div>"""
+    )
+
 with col4:
-    render_html(f"""<div class="kpi-card" data-module="EFF / 04"><div class="kpi-label">YTD COST / INCOME</div><div class="kpi-value">{ytd_cost_income:.1f}%</div><div class="executive-delta">{arrow_delta(ytd_ci_delta_pp)} vs {previous_month_label}</div><div class="executive-context">{efficiency_peer_advantage_pp:+.1f}pp efficiency advantage vs peer median</div><span class="micro-line"></span></div>""")
-st.write("")
+    risk_delta_class = "position-status-watch" if stage2_mom_pp > 0 or stage3_mom_pp > 0 else "position-status-good"
+    render_html(
+        f"""<div class="kpi-card position-risk" data-module="CRD / 04">
+        <div class="kpi-label">ASSET QUALITY</div>
+        <div class="kpi-value">{current_stage2_pct:.1f}%</div>
+        <div class="executive-delta {risk_delta_class}">Stage 2 · {stage2_mom_pp:+.2f}pp vs {previous_month_label}</div>
+        <div class="executive-context">Stage 3 {current_stage3_pct:.1f}% ({stage3_mom_pp:+.2f}pp) · {current_credit_watch_count} current watch(es)</div>
+        <span class="micro-line"></span></div>"""
+    )
+
+render_html(
+    f"""
+    <div class="balance-footprint">
+        <div class="balance-footprint-item">
+            <div class="balance-footprint-label">Total assets</div>
+            <div class="balance-footprint-value">€{total_assets / 1000:.1f}bn</div>
+            <div class="balance-footprint-context">Bank scale / balance-sheet footprint</div>
+        </div>
+        <div class="balance-footprint-item">
+            <div class="balance-footprint-label">Risk-weighted assets</div>
+            <div class="balance-footprint-value">€{rwa / 1000:.1f}bn</div>
+            <div class="balance-footprint-context">RWA density {rwa_density_pct:.1f}% of total assets</div>
+        </div>
+        <div class="balance-footprint-item">
+            <div class="balance-footprint-label">Loan exposure</div>
+            <div class="balance-footprint-value">€{current_loans_m / 1000:.1f}bn</div>
+            <div class="balance-footprint-context">Current certified loan book</div>
+        </div>
+        <div class="balance-footprint-item">
+            <div class="balance-footprint-label">Deposits</div>
+            <div class="balance-footprint-value">€{current_deposits_m / 1000:.1f}bn</div>
+            <div class="balance-footprint-context">{total_deposit_30d_change_pct:+.2f}% / €{total_deposit_30d_change_m / 1000:+.2f}bn over 30D</div>
+        </div>
+    </div>
+    """
+)
 
 
 # ============================================================
@@ -5122,6 +5353,10 @@ module_metadata = {
     "strategy": (
         "Intelligence 07 / Strategy",
         "Strategic opportunity radar and capability-gap intelligence",
+    ),
+    "news": (
+        "Intelligence 08 / External",
+        "Public developments and the bank metrics they may affect",
     ),
     "copilot": (
         "Module 04 / CFO Copilot",
@@ -5186,8 +5421,8 @@ render_html(
                     <a class="css-sector css-sector-horizon {radial_active('horizon')}" href="{radial_url('horizon')}" target="_self" aria-label="Open Horizon" title="Horizon — click to open"><span class="dial-hit-copy">Horizon</span></a>
                     <a class="css-sector css-sector-scenario {radial_active('scenario')}" href="{radial_url('scenario')}" target="_self" aria-label="Open What-If Engine" title="What-If Engine — click to open"><span class="dial-hit-copy">What-If Engine</span></a>
                     <span class="sector-label-html sector-label-brief {radial_active('brief')}"><strong class="sector-title-html">Morning Brief</strong><span class="sector-metric-html">NIM {cert_current_nim:.2f}% · {nim_mom_bps:+.1f} bps MoM</span><span class="sector-sub-html">Change · context · impact · next</span></span>
-                    <span class="sector-label-html sector-label-horizon {radial_active('horizon')}"><strong class="sector-title-html">Horizon</strong><span class="sector-metric-html">{cert_nim_months}M actuals · latest {cert_current_nim:.2f}%</span><span class="sector-sub-html">Trend · run-rate · stress path</span></span>
-                    <span class="sector-label-html sector-label-scenario {radial_active('scenario')}"><strong class="sector-title-html">What-If Engine</strong><span class="sector-metric-html">ECB ±100 bps · 365D max</span><span class="sector-sub-html">Simulate · quantify · compare</span></span>
+                    <span class="sector-label-html sector-label-horizon {radial_active('horizon')}"><strong class="sector-title-html">Horizon</strong><span class="sector-metric-html">Dec {horizon_year_end_nim:.2f}% · {horizon_change_bps:+.1f} bps vs Aug</span><span class="sector-sub-html">Actual → baseline → assumptions</span></span>
+                    <span class="sector-label-html sector-label-scenario {radial_active('scenario')}"><strong class="sector-title-html">What-If Engine</strong><span class="sector-metric-html">−50bp preview · NIM {home_scenario_nim_impact_bps:+.1f} bps</span><span class="sector-sub-html">Stress · quantify · compare</span></span>
                     <span class="dial-vector-line-html dial-vector-a" aria-hidden="true"></span><span class="dial-vector-line-html dial-vector-b" aria-hidden="true"></span><span class="dial-vector-line-html dial-vector-c" aria-hidden="true"></span><span class="dial-spoke-html dial-spoke-a" aria-hidden="true"></span><span class="dial-spoke-html dial-spoke-b" aria-hidden="true"></span><span class="dial-spoke-html dial-spoke-c" aria-hidden="true"></span>
                     <a class="css-core {radial_active('copilot')}" href="{radial_url('copilot')}" target="_self" aria-label="Open CFO Copilot" title="Ask CFO Copilot — click to open"><span class="core-orbit-html" aria-hidden="true"></span><span class="core-reactor-html" aria-hidden="true"></span><span class="core-scan-html" aria-hidden="true"></span><span class="core-copy-html"><span class="core-code-html">AI / Investigate</span><strong class="core-main-html">Ask CFO<br>Copilot</strong><span class="core-online-html">Question → evidence</span><span class="core-hint-html">Select core to investigate</span></span></a>
                     <span class="dial-cardinal-html dial-cardinal-n" aria-hidden="true">N / 000</span><span class="dial-cardinal-html dial-cardinal-e" aria-hidden="true">E / 090</span><span class="dial-cardinal-html dial-cardinal-s" aria-hidden="true">S / 180</span><span class="dial-cardinal-html dial-cardinal-w" aria-hidden="true">W / 270</span>
@@ -5195,10 +5430,28 @@ render_html(
             </div>
 
             <div class="cfo-decision-panel">
-                <div class="cfo-panel-kicker">Decision lens</div><div class="cfo-panel-title">Why / impact / next</div>
-                <div class="decision-lens-item"><div class="decision-lens-title">Margin</div><div class="decision-lens-line"><span class="decision-lens-label">Why</span><span class="decision-lens-copy">{nim_why}</span></div><div class="decision-lens-line"><span class="decision-lens-label">Impact</span><span class="decision-lens-copy">{nim_impact}</span></div><div class="decision-lens-line"><span class="decision-lens-label">Next</span><span class="decision-lens-copy">Inspect pricing/pass-through drivers.</span></div><a class="copilot-action" href="?module=copilot&investigate=nim#module-output" target="_self">Ask Copilot →</a></div>
-                <div class="decision-lens-item"><div class="decision-lens-title">Funding</div><div class="decision-lens-line"><span class="decision-lens-label">Why</span><span class="decision-lens-copy">{deposit_why}</span></div><div class="decision-lens-line"><span class="decision-lens-label">Impact</span><span class="decision-lens-copy">{deposit_impact}</span></div><div class="decision-lens-line"><span class="decision-lens-label">Next</span><span class="decision-lens-copy">Review slower-growth markets before repricing.</span></div><a class="copilot-action" href="?module=copilot&investigate=deposits#module-output" target="_self">Ask Copilot →</a></div>
-                <div class="decision-lens-item"><div class="decision-lens-title">External news</div><div class="decision-lens-line"><span class="decision-lens-label">Why</span><span class="decision-lens-copy">{news_why}</span></div><div class="decision-lens-line"><span class="decision-lens-label">Impact</span><span class="decision-lens-copy">Potential metric: {news_impact}</span></div><div class="decision-lens-line"><span class="decision-lens-label">Next</span><span class="decision-lens-copy">{news_next}</span></div><a class="copilot-action" href="?module=copilot&investigate=news#module-output" target="_self">Ask Copilot →</a></div>
+                <div class="cfo-panel-kicker">Decision path</div><div class="cfo-panel-title">Current → outlook → stress</div>
+
+                <div class="decision-lens-item">
+                    <div class="decision-lens-title">01 / Current performance</div>
+                    <div class="decision-lens-line"><span class="decision-lens-label">Actual</span><span class="decision-lens-copy">NIM {cert_current_nim:.2f}% · monthly NII €{cert_current_monthly_nii:,.0f}m.</span></div>
+                    <div class="decision-lens-line"><span class="decision-lens-label">Change</span><span class="decision-lens-copy">{nim_mom_bps:+.1f} bps NIM vs {previous_month_label} · deposits {total_deposit_30d_change_pct:+.2f}% over 30D.</span></div>
+                    <a class="copilot-action" href="?module=brief#module-output" target="_self">Open Morning Brief →</a>
+                </div>
+
+                <div class="decision-lens-item">
+                    <div class="decision-lens-title">02 / Forward baseline</div>
+                    <div class="decision-lens-line"><span class="decision-lens-label">December</span><span class="decision-lens-copy">NIM {horizon_year_end_nim:.2f}% · {horizon_change_bps:+.1f} bps vs August.</span></div>
+                    <div class="decision-lens-line"><span class="decision-lens-label">FY NII</span><span class="decision-lens-copy">€{horizon_full_year_nii_m / 1000:.2f}bn mechanical run-rate; not an official management forecast.</span></div>
+                    <a class="copilot-action" href="?module=horizon#module-output" target="_self">Open Horizon →</a>
+                </div>
+
+                <div class="decision-lens-item">
+                    <div class="decision-lens-title">03 / Stress preview</div>
+                    <div class="decision-lens-line"><span class="decision-lens-label">Assumption</span><span class="decision-lens-copy">ECB −50 bps · no deposit-volume shock · 365 days.</span></div>
+                    <div class="decision-lens-line"><span class="decision-lens-label">Impact</span><span class="decision-lens-copy">NIM {home_scenario_nim_impact_bps:+.1f} bps · NII €{home_scenario_nii_impact_m:+,.0f}m over horizon.</span></div>
+                    <a class="copilot-action" href="?module=scenario#module-output" target="_self">Open What-If Engine →</a>
+                </div>
             </div>
         </div>
         <div class="system-bottom-rail"><span>Current view / {active_module_name}</span><a class="system-reset {'is-home' if selected_module == 'home' else ''}" href="?module=home#radial-command" target="_self">◎ Overview</a><span>Select a vector to investigate</span></div>
@@ -5210,11 +5463,12 @@ render_html(
 render_html(
     f"""
     <div class="intelligence-dock">
-        <div class="dock-kicker">Explore intelligence</div>
+        <div class="dock-kicker">Context beyond the core financial engine</div>
         <div class="dock-actions">
-            <a class="dock-action {radial_active('strategy')}" href="{radial_url('strategy')}" target="_self"><span class="dock-icon">◎</span><span class="dock-copy"><strong class="dock-title">Strategy</strong><span class="dock-metric">#1 {html.escape(str(top_strategy['company_name'])) if top_strategy is not None else '—'} · why it ranks first</span></span></a>
-            <a class="dock-action {radial_active('peers')}" href="{radial_url('peers')}" target="_self"><span class="dock-icon">◌</span><span class="dock-copy"><strong class="dock-title">Peers</strong><span class="dock-metric">ROE proxy {roe_peer_gap_pp:+.1f}pp vs median · directional</span></span></a>
-            <a class="dock-action {radial_active('treasury')}" href="{radial_url('treasury')}" target="_self"><span class="dock-icon">△</span><span class="dock-copy"><strong class="dock-title">Treasury</strong><span class="dock-metric">+50bp impact {treasury_rate50_text} · evaluate hedge options</span></span></a>
+            <a class="dock-action dock-strategy {radial_active('strategy')}" href="{radial_url('strategy')}" target="_self"><span class="dock-icon">◎</span><span class="dock-copy"><strong class="dock-title">Strategy</strong><span class="dock-metric">#1 {html.escape(str(top_strategy['company_name'])) if top_strategy is not None else '—'} · opportunity / capability lens</span></span></a>
+            <a class="dock-action dock-peers {radial_active('peers')}" href="{radial_url('peers')}" target="_self"><span class="dock-icon">◌</span><span class="dock-copy"><strong class="dock-title">Peers</strong><span class="dock-metric">ROE proxy {roe_peer_gap_pp:+.1f}pp vs median · capital / efficiency context</span></span></a>
+            <a class="dock-action dock-treasury {radial_active('treasury')}" href="{radial_url('treasury')}" target="_self"><span class="dock-icon">△</span><span class="dock-copy"><strong class="dock-title">Treasury</strong><span class="dock-metric">+50bp EVE {treasury_rate50_text} · DV01 / hedge trade-off</span></span></a>
+            <a class="dock-action dock-news {radial_active('news')}" href="{radial_url('news')}" target="_self"><span class="dock-icon">◇</span><span class="dock-copy"><strong class="dock-title">External</strong><span class="dock-metric">{news_signal_primary}</span></span></a>
         </div>
     </div>
     """
@@ -5226,8 +5480,8 @@ if selected_module == "home":
     render_html(
         """
         <div class="system-overview-note" id="module-output">
-            <span class="overview-title">Today at a glance</span>
-            <span class="overview-copy">Start with Morning Brief for changes, Horizon for forward view, What-If for decisions under stress, or ask Copilot to investigate.</span>
+            <span class="overview-title">CFO storyline</span>
+            <span class="overview-copy">Position is shown first for comfort. Use the radial to move from actual performance to forward baseline to stress. Strategy, peers, Treasury and external intelligence remain one layer out so they add context without crowding the core decision path.</span>
         </div>
         """
     )
@@ -5888,6 +6142,95 @@ if selected_module == "strategy":
             "Time to value", "Overall score"
         ]
         st.dataframe(strategy_display, use_container_width=True, hide_index=True)
+
+
+
+# ============================================================
+# EXTERNAL INTELLIGENCE
+# ============================================================
+
+if selected_module == "news":
+    render_html(
+        """
+        <div class="module-code">Intelligence 08 / External developments</div>
+        <div class="section-title">External Intelligence</div>
+        <div class="section-subtitle">
+            Public developments are kept separate from internal financial facts.
+            The prepared bank-impact fields are prototype interpretation, not proof of causality.
+        </div>
+        """
+    )
+
+    n1, n2, n3 = st.columns(3)
+    with n1:
+        render_html(
+            f"""<div class="kpi-card" data-module="NEWS / 08">
+            <div class="kpi-label">HIGH-IMPACT ITEMS</div>
+            <div class="kpi-value">{high_impact_news_count}</div>
+            <div class="kpi-neutral">recent configured news window</div>
+            <span class="micro-line"></span></div>"""
+        )
+    with n2:
+        geo_name = html.escape(str(geo_focus["country"])) if geo_focus is not None else "—"
+        geo_score = safe_float(geo_focus["geo_attention_score"]) if geo_focus is not None else 0.0
+        render_html(
+            f"""<div class="kpi-card" data-module="GEO / 08">
+            <div class="kpi-label">GEO ATTENTION</div>
+            <div class="kpi-value" style="font-size:1.7rem;">{geo_name}</div>
+            <div class="kpi-neutral">attention score {geo_score:.1f}</div>
+            <span class="micro-line"></span></div>"""
+        )
+    with n3:
+        affected = html.escape(str(top_news["primary_affected_metric"])) if top_news is not None else "—"
+        render_html(
+            f"""<div class="kpi-card" data-module="MET / 08">
+            <div class="kpi-label">TOP AFFECTED METRIC</div>
+            <div class="kpi-value" style="font-size:1.55rem;">{affected}</div>
+            <div class="kpi-neutral">potential impact only</div>
+            <span class="micro-line"></span></div>"""
+        )
+
+    if news_recent_df is not None and not news_recent_df.empty:
+        render_html(
+            """<div class="module-code" style="margin-top:1rem;">Public-source feed</div>
+            <div class="section-title">What may matter now?</div>"""
+        )
+        for _, article in news_recent_df.head(6).iterrows():
+            headline = html.escape(str(article["headline"]))
+            source = html.escape(str(article["source"]))
+            source_url = html.escape(str(article["source_url"]), quote=True)
+            affected_metric = html.escape(str(article["primary_affected_metric"]))
+            article_date = pd.to_datetime(article["published_date"]).strftime("%d %b")
+            impact_summary = html.escape(clip_ui_text(article.get("bank_impact_summary", ""), 150))
+            next_action = html.escape(clip_ui_text(article.get("suggested_action", ""), 125))
+            category = html.escape(str(article.get("category", "External development")))
+            render_html(
+                f"""
+                <div class="news-card">
+                    <div class="news-topline"><span class="news-badge">News</span><span class="news-meta">{source} · {article_date} · {category}</span></div>
+                    <div class="news-headline">{headline}</div>
+                    <div class="news-context-grid">
+                        <div class="news-context-line"><span class="news-context-label">Why it may matter</span><span class="news-context-copy">{impact_summary}</span></div>
+                        <div class="news-context-line"><span class="news-context-label">Potential metric</span><span class="news-context-copy">{affected_metric}</span></div>
+                        <div class="news-context-line"><span class="news-context-label">Next investigation</span><span class="news-context-copy">{next_action}</span></div>
+                    </div>
+                    <div class="news-footer"><a class="news-source-link" href="{source_url}" target="_blank" rel="noopener noreferrer">Open article ↗</a><span class="news-public-note">Public source · bank impact is prototype analysis</span></div>
+                </div>
+                """
+            )
+
+        if st.button(
+            "Ask CFO Copilot to connect external developments to the bank →",
+            key="news_to_copilot",
+            use_container_width=True,
+        ):
+            st.session_state["brief_copilot_prompt"] = COPILOT_INVESTIGATION_PROMPTS.get(
+                "news",
+                "Review the latest external developments and connect them to the bank's certified financial position without inventing causality.",
+            )
+            navigate_to_module("copilot")
+    else:
+        st.info("No recent public-source records are available in the configured window.")
 
 
 

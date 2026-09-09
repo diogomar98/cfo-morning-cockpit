@@ -1,4 +1,6 @@
 from pathlib import Path
+import argparse
+import os
 import numpy as np
 import pandas as pd
 
@@ -99,7 +101,11 @@ def generate_peer_datasets(output_dir: str = "data"):
 
 
 if __name__ == "__main__":
-    peers, positioning, benchmarks = generate_peer_datasets()
+    parser = argparse.ArgumentParser(description="Generate peer benchmarking datasets.")
+    parser.add_argument("--output-dir", default=os.getenv("CFO_OUTPUT_DIR", "data"))
+    args = parser.parse_args()
+
+    peers, positioning, benchmarks = generate_peer_datasets(output_dir=args.output_dir)
     print(f"Created peer_financials.csv with {len(peers)} real peers.")
     print(f"Created peer_positioning.csv with {len(positioning)} peers.")
     print(f"Created peer_benchmarks.csv with {len(benchmarks)} benchmark metrics.")

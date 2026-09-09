@@ -5,10 +5,10 @@ Load the generated CFO Morning Cockpit CSV files from a Unity Catalog Volume
 into managed Delta tables.
 
 Expected source folder:
-    /Volumes/workspace/cfo_cockpit/raw_files/generated
+    /Volumes/<catalog>/<schema>/raw_files/generated
 
 Target catalog/schema:
-    workspace.cfo_cockpit
+    <catalog>.<schema>
 
 The script creates/overwrites tables with a `raw_` prefix so the generated
 source layer stays separate from future certified `cfo_*` views.
@@ -16,12 +16,19 @@ source layer stays separate from future certified `cfo_*` views.
 Run as a Databricks Python script / Workflow task.
 """
 
+import argparse
+import os
+
 from pyspark.sql import SparkSession
 
 
-SOURCE_DIR = "/Volumes/workspace/cfo_cockpit/raw_files/generated"
-CATALOG = "workspace"
-SCHEMA = "cfo_cockpit"
+CATALOG = os.getenv("CFO_DATA_CATALOG", "workspace")
+SCHEMA = os.getenv("CFO_DATA_SCHEMA", "cfo_cockpit")
+RAW_VOLUME = os.getenv("CFO_RAW_VOLUME", "raw_files")
+SOURCE_DIR = os.getenv(
+    "CFO_OUTPUT_DIR",
+    f"/Volumes/{CATALOG}/{SCHEMA}/{RAW_VOLUME}/generated",
+)
 
 FILE_TO_TABLE = {
     "bank_history.csv": "raw_bank_history",
@@ -124,5 +131,20 @@ def load_raw_data(
     )
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Load generated CFO Cockpit CSVs into raw Delta tables."
+    )
+    parser.add_argument("--source-dir", default=SOURCE_DIR)
+    parser.add_argument("--catalog", default=CATALOG)
+    parser.add_argument("--schema", default=SCHEMA)
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    load_raw_data()
+    args = parse_args()
+    load_raw_data(
+        source_dir=args.source_dir,
+        catalog=args.catalog,
+        schema=args.schema,
+    )

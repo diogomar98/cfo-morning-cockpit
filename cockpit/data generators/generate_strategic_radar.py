@@ -1,4 +1,6 @@
 from pathlib import Path
+import argparse
+import os
 import numpy as np
 import pandas as pd
 
@@ -69,6 +71,10 @@ def generate_strategic_radar(output_dir: str = "data"):
 
 
 if __name__ == "__main__":
-    radar, capability_map = generate_strategic_radar()
+    parser = argparse.ArgumentParser(description="Generate strategic radar datasets.")
+    parser.add_argument("--output-dir", default=os.getenv("CFO_OUTPUT_DIR", "data"))
+    args = parser.parse_args()
+
+    radar, capability_map = generate_strategic_radar(output_dir=args.output_dir)
     print(f"Created strategic_radar.csv with {len(radar)} real companies.")
     print(f"Created strategic_capability_map.csv with {len(capability_map)} capabilities.")

@@ -1,4 +1,6 @@
 from pathlib import Path
+import argparse
+import os
 
 import numpy as np
 import pandas as pd
@@ -209,10 +211,17 @@ def generate_bank_history(months: int = 48, seed: int = 42) -> pd.DataFrame:
 
 
 if __name__ == "__main__":
-    output_path = Path("data/bank_history.csv")
+    default_output = Path(os.getenv("CFO_OUTPUT_DIR", "data")) / "bank_history.csv"
+    parser = argparse.ArgumentParser(description="Generate synthetic monthly bank history.")
+    parser.add_argument("--output", default=str(default_output))
+    parser.add_argument("--months", type=int, default=48)
+    parser.add_argument("--seed", type=int, default=42)
+    args = parser.parse_args()
+
+    output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    bank_history = generate_bank_history()
+    bank_history = generate_bank_history(months=args.months, seed=args.seed)
     bank_history.to_csv(output_path)
 
     print(
