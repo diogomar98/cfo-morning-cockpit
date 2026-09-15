@@ -1,0 +1,722 @@
+"""
+Certified CFO view layer.
+
+Local pandas ports of the Databricks views defined in the reference cockpit's
+``build_certified_views.py``. Each function returns the same columns, with the
+same names, as the SQL view it replaces, so the HUD presentation layer can be
+lifted across unchanged.
+
+Design principle, unchanged from the reference:
+    raw data -> deterministic finance logic -> certified views -> UI.
+
+No LLM calculations happen here. Ratios are recalculated from underlying
+amounts where aggregation is required; balance-sheet stocks are never summed
+across dates.
+"""
+
+import numpy as np
+import pandas as pd
+import streamlit as st
+
+from src.data_generator import generate_bank_history
+from src.metrics import calculate_metrics
+from src.extended_data_loader import (
+    load_bank_daily_signals,
+    load_news_geo_impact,
+    load_news_signals,
+    load_peer_benchmarks,
+    load_peer_financials,
+    load_peer_positioning,
+    load_strategic_capability_map,
+    load_strategic_radar,
+    load_treasury_hedge_options,
+    load_treasury_portfolio,
+    load_treasury_scenario_impacts,
+)
+
+# Matches the reference bank-history generator, which the local generator
+# predates. Used only to reconstruct the post-tax P&L lines the certified
+# views expose; CET1 itself comes straight from the generated data.
+TAX_RATE = 0.25
+DIVIDEND_PAYOUT_RATIO = 0.60
+
+HISTORY_MONTHS = 48
+HISTORY_SEED = 20260826
+
+
+def _weighted(frame, value_col, weight_col):
+    """Weighted mean that returns NaN rather than dividing by zero."""
+    weights = frame[weight_col]
+    total = weights.sum()
+    if total == 0 or pd.isna(total):
+        return np.nan
+    return (frame[value_col] * weights).sum() / total
+
+
+def _safe_ratio(numerator, denominator, scale=1.0):
+    """Element-wise ratio where a zero denominator yields NaN, as in SQL."""
+    denominator = denominator.replace(0, np.nan)
+    return numerator / denominator * scale
+
+
+@st.cache_data
+def raw_bank_history():
+    """
+    The monthly history in the shape the certified views expect.
+
+    The generator emits the full P&L; the ratio columns come from
+    ``calculate_metrics``. Post-tax lines are reconstructed only if a caller
+    supplies history that predates them.
+    """
+    history = calculate_metrics(
+        generate_bank_history(months=HISTORY_MONTHS, seed=HISTORY_SEED)
+    ).reset_index()
+
+    if "other_income" not in history.columns:
+        # Identity: operating income is built from these three lines.
+        history["other_income"] = (
+            history["operating_income"] - history["nii"] - history["fee_income"]
+        )
+
+    if "net_profit" not in history.columns:
+        history["tax_expense"] = (
+            history["pre_tax_profit"].clip(lower=0) * TAX_RATE
+        )
+        history["net_profit"] = (
+            history["pre_tax_profit"] - history["tax_expense"]
+        )
+        history["dividends"] = (
+            history["net_profit"].clip(lower=0) * DIVIDEND_PAYOUT_RATIO
+        )
+        history["retained_earnings"] = (
+            history["net_profit"] - history["dividends"]
+        )
+
+    history["cost_income_ratio_pct"] = history["cost_to_income_pct"]
+
+    return history
+
+
+@st.cache_data
+def cfo_financial_history():
+    history = raw_bank_history()
+
+    return pd.DataFrame(
+        {
+            "date": history["date"],
+            "loans_m": history["loans"],
+            "deposits_m": history["deposits"],
+            "deposit_movement_m": history["deposit_movement"],
+            "loan_growth_mom_pct": history["loan_growth_mom_pct"],
+            "gross_carrying_amount_m": history["gca"],
+            "ead_m": history["ead"],
+            "provisions_m": history["provisions"],
+            "stage_1_share_pct": history["stage_1_share_pct"],
+            "stage_2_share_pct": history["stage_2_share_pct"],
+            "stage_3_share_pct": history["stage_3_share_pct"],
+            "rwa_m": history["rwa"],
+            "cet1_capital_m": history["cet1_capital"],
+            "at1_capital_m": history["at1_capital"],
+            "tier2_capital_m": history["tier2_capital"],
+            "hqla_m": history["hqla"],
+            "net_cash_outflows_m": history["net_cash_outflows"],
+            "ecb_rate_pct": history["ecb_rate_pct"],
+            "avg_loan_yield_pct": history["avg_loan_yield_pct"],
+            "avg_deposit_cost_pct": history["avg_deposit_cost_pct"],
+            "nii_m": history["nii"],
+            "fee_income_m": history["fee_income"],
+            "other_income_m": history["other_income"],
+            "operating_income_m": history["operating_income"],
+            "operating_costs_m": history["operating_costs"],
+            "provision_charge_m": history["provision_charge"],
+            "pre_tax_profit_m": history["pre_tax_profit"],
+            "tax_expense_m": history["tax_expense"],
+            "net_profit_m": history["net_profit"],
+            "dividends_m": history["dividends"],
+            "retained_earnings_m": history["retained_earnings"],
+            "cost_income_ratio_pct": history["cost_income_ratio_pct"],
+            "cet1_ratio_pct": history["cet1_ratio_pct"],
+            "lcr_pct": history["lcr_pct"],
+            "loan_to_deposit_pct": history["loan_to_deposit_pct"],
+            "total_capital_ratio_pct": history["total_capital_ratio_pct"],
+            "total_assets_m": history["total_assets"],
+            "total_liabilities_m": history["total_liabilities"],
+        }
+    )
+
+
+@st.cache_data
+def cfo_current_position():
+    """Latest month-end position plus the year-to-date aggregates."""
+    history = raw_bank_history()
+    latest_date = history["date"].max()
+    current = history[history["date"] == latest_date].iloc[0]
+
+    reporting_year = latest_date.year
+    ytd = history[history["date"].dt.year == reporting_year]
+    months_observed = ytd["date"].dt.month.nunique()
+
+    ytd_operating_income_m = ytd["operating_income"].sum()
+    ytd_operating_costs_m = ytd["operating_costs"].sum()
+    ytd_net_profit_m = ytd["net_profit"].sum()
+    avg_ytd_cet1_capital_m = ytd["cet1_capital"].mean()
+
+    ytd_cost_income_ratio_pct = (
+        ytd_operating_costs_m / ytd_operating_income_m * 100
+        if ytd_operating_income_m
+        else np.nan
+    )
+
+    annualised_ytd_roe_proxy_pct = (
+        (ytd_net_profit_m * (12.0 / months_observed)) / avg_ytd_cet1_capital_m * 100
+        if avg_ytd_cet1_capital_m and months_observed
+        else np.nan
+    )
+
+    return pd.DataFrame(
+        [
+            {
+                "as_of_date": latest_date,
+                "loans_m": current["loans"],
+                "deposits_m": current["deposits"],
+                "total_assets_m": current["total_assets"],
+                "total_liabilities_m": current["total_liabilities"],
+                "rwa_m": current["rwa"],
+                "cet1_capital_m": current["cet1_capital"],
+                "at1_capital_m": current["at1_capital"],
+                "tier2_capital_m": current["tier2_capital"],
+                "cet1_ratio_pct": current["cet1_ratio_pct"],
+                "total_capital_ratio_pct": current["total_capital_ratio_pct"],
+                "hqla_m": current["hqla"],
+                "net_cash_outflows_m": current["net_cash_outflows"],
+                "lcr_pct": current["lcr_pct"],
+                "loan_to_deposit_pct": current["loan_to_deposit_pct"],
+                "stage_1_share_pct": current["stage_1_share_pct"],
+                "stage_2_share_pct": current["stage_2_share_pct"],
+                "stage_3_share_pct": current["stage_3_share_pct"],
+                "ecb_rate_pct": current["ecb_rate_pct"],
+                "avg_loan_yield_pct": current["avg_loan_yield_pct"],
+                "avg_deposit_cost_pct": current["avg_deposit_cost_pct"],
+                "reporting_year": reporting_year,
+                "months_observed": months_observed,
+                "ytd_nii_m": ytd["nii"].sum(),
+                "ytd_fee_income_m": ytd["fee_income"].sum(),
+                "ytd_operating_income_m": ytd_operating_income_m,
+                "ytd_operating_costs_m": ytd_operating_costs_m,
+                "ytd_provision_charge_m": ytd["provision_charge"].sum(),
+                "ytd_pre_tax_profit_m": ytd["pre_tax_profit"].sum(),
+                "ytd_net_profit_m": ytd_net_profit_m,
+                "ytd_cost_income_ratio_pct": ytd_cost_income_ratio_pct,
+                "annualised_ytd_roe_proxy_pct": annualised_ytd_roe_proxy_pct,
+            }
+        ]
+    )
+
+
+@st.cache_data
+def cfo_daily_bank():
+    """Bank-wide daily aggregation of the granular signal table."""
+    daily = load_bank_daily_signals()
+    if daily.empty:
+        return daily
+
+    grouped = daily.groupby("date", as_index=False).agg(
+        interest_earning_assets_m=("loan_balance_m", "sum"),
+        deposit_balance_m=("deposit_balance_m", "sum"),
+        daily_interest_income_m=("daily_interest_income_m", "sum"),
+        daily_interest_expense_m=("daily_interest_expense_m", "sum"),
+        daily_nii_m=("daily_nii_m", "sum"),
+        ecb_rate_pct=("ecb_rate_pct", "max"),
+        rwa_m=("rwa_m", "sum"),
+        has_anomaly=("anomaly_flag", "max"),
+    )
+
+    rates = daily.groupby("date").apply(
+        lambda g: pd.Series(
+            {
+                "weighted_loan_rate_pct": _weighted(
+                    g, "interest_rate_pct", "loan_balance_m"
+                ),
+                "weighted_deposit_rate_pct": _weighted(
+                    g, "interest_rate_pct", "deposit_balance_m"
+                ),
+            }
+        ),
+        include_groups=False,
+    )
+
+    grouped = grouped.merge(rates, on="date", how="left")
+
+    grouped["annualised_daily_nim_pct"] = _safe_ratio(
+        grouped["daily_nii_m"] * 365.0,
+        grouped["interest_earning_assets_m"],
+        scale=100,
+    )
+
+    return grouped[
+        [
+            "date",
+            "interest_earning_assets_m",
+            "deposit_balance_m",
+            "daily_interest_income_m",
+            "daily_interest_expense_m",
+            "daily_nii_m",
+            "weighted_loan_rate_pct",
+            "weighted_deposit_rate_pct",
+            "annualised_daily_nim_pct",
+            "ecb_rate_pct",
+            "rwa_m",
+            "has_anomaly",
+        ]
+    ]
+
+
+def _daily_by(keys):
+    """Shared aggregation for the country and business-line daily views."""
+    daily = load_bank_daily_signals()
+    if daily.empty:
+        return daily
+
+    grouped = daily.groupby(keys, as_index=False).agg(
+        interest_earning_assets_m=("loan_balance_m", "sum"),
+        deposit_balance_m=("deposit_balance_m", "sum"),
+        daily_interest_income_m=("daily_interest_income_m", "sum"),
+        daily_interest_expense_m=("daily_interest_expense_m", "sum"),
+        daily_nii_m=("daily_nii_m", "sum"),
+        rwa_m=("rwa_m", "sum"),
+        has_anomaly=("anomaly_flag", "max"),
+    )
+
+    weighted = daily.groupby(keys).apply(
+        lambda g: pd.Series(
+            {
+                "weighted_loan_rate_pct": _weighted(
+                    g, "interest_rate_pct", "loan_balance_m"
+                ),
+                "weighted_deposit_rate_pct": _weighted(
+                    g, "interest_rate_pct", "deposit_balance_m"
+                ),
+                "weighted_stage_2_share_pct": _weighted(
+                    g, "stage_2_share_pct", "loan_balance_m"
+                ),
+                "weighted_stage_3_share_pct": _weighted(
+                    g, "stage_3_share_pct", "loan_balance_m"
+                ),
+            }
+        ),
+        include_groups=False,
+    )
+
+    grouped = grouped.merge(weighted, on=keys, how="left")
+
+    grouped["annualised_daily_nim_pct"] = _safe_ratio(
+        grouped["daily_nii_m"] * 365.0,
+        grouped["interest_earning_assets_m"],
+        scale=100,
+    )
+
+    return grouped
+
+
+@st.cache_data
+def cfo_daily_country():
+    grouped = _daily_by(["date", "country"])
+    if grouped.empty:
+        return grouped
+
+    return grouped[
+        [
+            "date",
+            "country",
+            "interest_earning_assets_m",
+            "deposit_balance_m",
+            "daily_interest_income_m",
+            "daily_interest_expense_m",
+            "daily_nii_m",
+            "weighted_loan_rate_pct",
+            "weighted_deposit_rate_pct",
+            "annualised_daily_nim_pct",
+            "rwa_m",
+            "weighted_stage_2_share_pct",
+            "weighted_stage_3_share_pct",
+            "has_anomaly",
+        ]
+    ]
+
+
+@st.cache_data
+def cfo_daily_business_country():
+    grouped = _daily_by(["date", "country", "business_line"])
+    if grouped.empty:
+        return grouped
+
+    return grouped[
+        [
+            "date",
+            "country",
+            "business_line",
+            "interest_earning_assets_m",
+            "deposit_balance_m",
+            "daily_nii_m",
+            "rwa_m",
+            "weighted_stage_2_share_pct",
+            "weighted_stage_3_share_pct",
+            "has_anomaly",
+        ]
+    ]
+
+
+@st.cache_data
+def cfo_monthly_nim():
+    """
+    Certified monthly NIM, annualised from the observed days in each month.
+
+    Partial months stay comparable because the annualisation divides by the
+    days actually observed rather than assuming a full month.
+    """
+    daily = cfo_daily_bank()
+    if daily.empty:
+        return daily
+
+    frame = daily.copy()
+    frame["month"] = frame["date"].dt.to_period("M").dt.to_timestamp()
+
+    monthly = frame.groupby("month", as_index=False).agg(
+        monthly_nii_m=("daily_nii_m", "sum"),
+        avg_interest_earning_assets_m=("interest_earning_assets_m", "mean"),
+        days_observed=("date", "nunique"),
+    )
+
+    monthly["nim_pct"] = np.where(
+        (monthly["avg_interest_earning_assets_m"] != 0)
+        & (monthly["days_observed"] > 0),
+        monthly["monthly_nii_m"]
+        * (365.0 / monthly["days_observed"])
+        / monthly["avg_interest_earning_assets_m"]
+        * 100,
+        np.nan,
+    )
+
+    return monthly
+
+
+@st.cache_data
+def cfo_deposit_signals():
+    """
+    Deposit balances by country and business line with 1D / 7D / 30D changes.
+
+    The changes are recomputed here rather than read from the raw file so the
+    lag semantics match the certified view exactly: a lag of N rows within each
+    country and business line, ordered by date.
+    """
+    daily = load_bank_daily_signals()
+    if daily.empty:
+        return daily
+
+    frame = (
+        daily.groupby(["date", "country", "business_line"], as_index=False)[
+            "deposit_balance_m"
+        ]
+        .sum()
+        .sort_values(["country", "business_line", "date"])
+    )
+
+    grouped = frame.groupby(["country", "business_line"])["deposit_balance_m"]
+
+    for lag in (1, 7, 30):
+        prior = grouped.shift(lag)
+        frame[f"deposit_change_{lag}d_m"] = frame["deposit_balance_m"] - prior
+        frame[f"deposit_change_{lag}d_pct"] = (
+            frame["deposit_balance_m"] / prior.replace(0, np.nan) - 1
+        ) * 100
+
+    return frame.reset_index(drop=True)
+
+
+@st.cache_data
+def cfo_credit_signals():
+    """Loan-weighted IFRS 9 stage shares by country and business line."""
+    daily = load_bank_daily_signals()
+    if daily.empty:
+        return daily
+
+    lending = daily[daily["loan_balance_m"] > 0]
+    keys = ["date", "country", "business_line"]
+
+    grouped = lending.groupby(keys, as_index=False).agg(
+        loan_balance_m=("loan_balance_m", "sum"),
+        rwa_m=("rwa_m", "sum"),
+    )
+
+    weighted = lending.groupby(keys).apply(
+        lambda g: pd.Series(
+            {
+                "weighted_stage_1_share_pct": _weighted(
+                    g, "stage_1_share_pct", "loan_balance_m"
+                ),
+                "weighted_stage_2_share_pct": _weighted(
+                    g, "stage_2_share_pct", "loan_balance_m"
+                ),
+                "weighted_stage_3_share_pct": _weighted(
+                    g, "stage_3_share_pct", "loan_balance_m"
+                ),
+                "credit_watch_flag": int(
+                    (g["anomaly_type"] == "CREDIT_WATCH").any()
+                ),
+            }
+        ),
+        include_groups=False,
+    )
+
+    return grouped.merge(weighted, on=keys, how="left")
+
+
+@st.cache_data
+def cfo_news_intelligence():
+    """News signals joined to their per-country exposure rows."""
+    news = load_news_signals()
+    geo = load_news_geo_impact()
+
+    if news.empty or geo.empty:
+        return pd.DataFrame()
+
+    # Both sides carry published_date and impact_direction; the certified view
+    # takes them from the news signal, so drop the geo copies before joining.
+    geo_side = geo.drop(columns=["published_date", "impact_direction"], errors="ignore")
+
+    joined = news.merge(geo_side, on="news_id", how="inner")
+
+    return joined[
+        [
+            "news_id",
+            "published_date",
+            "headline",
+            "source",
+            "source_url",
+            "category",
+            "geographic_scope",
+            "summary",
+            "primary_affected_metric",
+            "secondary_metrics",
+            "impact_direction",
+            "potential_impact_level",
+            "relevance_score",
+            "confidence_score",
+            "bank_impact_summary",
+            "suggested_action",
+            "linked_scenario",
+            "scenario_status",
+            "country",
+            "country_code",
+            "bank_exposure_share_pct",
+            "geographic_relevance_weight",
+            "geo_impact_score",
+            "map_impact_level",
+            "signed_geo_score",
+            "exposure_reason",
+            "classification_method",
+            "is_public_source",
+        ]
+    ]
+
+
+@st.cache_data
+def cfo_geo_news_summary():
+    """Per-country news attention over the trailing 30 days of coverage."""
+    intelligence = cfo_news_intelligence()
+    if intelligence.empty:
+        return intelligence
+
+    latest_news_date = intelligence["published_date"].max()
+    recent = intelligence[
+        intelligence["published_date"]
+        >= latest_news_date - pd.Timedelta(days=29)
+    ]
+
+    summary = recent.groupby(["country", "country_code"], as_index=False).agg(
+        bank_exposure_share_pct=("bank_exposure_share_pct", "max"),
+        relevant_news_count=("news_id", "nunique"),
+        max_geo_impact_score=("geo_impact_score", "max"),
+        avg_geo_impact_score=("geo_impact_score", "mean"),
+        latest_news_date=("published_date", "max"),
+    )
+
+    levels = recent.groupby(["country", "country_code"], as_index=False).agg(
+        high_impact_news_count=(
+            "map_impact_level",
+            lambda s: int((s == "HIGH").sum()),
+        ),
+        medium_impact_news_count=(
+            "map_impact_level",
+            lambda s: int((s == "MEDIUM").sum()),
+        ),
+    )
+
+    summary = summary.merge(levels, on=["country", "country_code"], how="left")
+
+    summary["geo_attention_score"] = (
+        0.60 * summary["max_geo_impact_score"]
+        + 0.40 * summary["avg_geo_impact_score"]
+    ).round(1)
+
+    return summary
+
+
+@st.cache_data
+def cfo_treasury_summary():
+    """Single-row portfolio summary: value, duration, DV01, accounting split."""
+    portfolio = load_treasury_portfolio()
+    if portfolio.empty:
+        return pd.DataFrame()
+
+    market_value_m = portfolio["market_value_m"].sum()
+
+    return pd.DataFrame(
+        [
+            {
+                "as_of_date": portfolio["as_of_date"].max(),
+                "book_value_m": portfolio["book_value_m"].sum(),
+                "market_value_m": market_value_m,
+                "unrealized_pnl_m": portfolio["unrealized_pnl_m"].sum(),
+                "weighted_modified_duration": _weighted(
+                    portfolio, "modified_duration", "market_value_m"
+                ),
+                "portfolio_dv01_m_per_bp": portfolio["dv01_m_per_bp"].sum(),
+                "fvoci_market_value_m": portfolio.loc[
+                    portfolio["accounting_classification"] == "FVOCI",
+                    "market_value_m",
+                ].sum(),
+                "amortised_cost_market_value_m": portfolio.loc[
+                    portfolio["accounting_classification"] == "Amortised Cost",
+                    "market_value_m",
+                ].sum(),
+                "green_bond_market_value_m": portfolio.loc[
+                    portfolio["is_green_bond"] == 1, "market_value_m"
+                ].sum(),
+            }
+        ]
+    )
+
+
+@st.cache_data
+def cfo_treasury_scenarios():
+    """Position-level scenario impacts rolled up to one row per scenario."""
+    impacts = load_treasury_scenario_impacts()
+    if impacts.empty:
+        return impacts
+
+    scenarios = impacts.groupby("scenario_name", as_index=False).agg(
+        scenario_description=("scenario_description", "max"),
+        rate_shock_bps=("rate_shock_bps", "max"),
+        credit_spread_shock_bps=("credit_spread_shock_bps", "max"),
+        base_market_value_m=("base_market_value_m", "sum"),
+        stressed_market_value_m=("stressed_market_value_m", "sum"),
+        economic_value_impact_m=("economic_value_impact_m", "sum"),
+        estimated_oci_impact_m=("estimated_oci_impact_m", "sum"),
+        estimated_immediate_pnl_impact_m=(
+            "estimated_immediate_pnl_impact_m",
+            "sum",
+        ),
+    )
+
+    scenarios["economic_value_impact_pct"] = _safe_ratio(
+        scenarios["economic_value_impact_m"],
+        scenarios["base_market_value_m"],
+        scale=100,
+    )
+
+    return scenarios
+
+
+@st.cache_data
+def cfo_hedge_options():
+    return load_treasury_hedge_options()
+
+
+@st.cache_data
+def cfo_peer_benchmark():
+    """Peer financials joined to their positioning against the peer medians."""
+    financials = load_peer_financials()
+    positioning = load_peer_positioning()
+
+    if financials.empty:
+        return financials
+
+    positioning_cols = [
+        "bank_id",
+        "profitability_peer_median_pct",
+        "cet1_peer_median_pct",
+        "cost_income_peer_median_pct",
+        "profitability_vs_peer_median_pp",
+        "cet1_vs_peer_median_pp",
+        "efficiency_vs_peer_median_pp",
+        "positioning_quadrant",
+        "comparison_caveat",
+    ]
+
+    if positioning.empty:
+        merged = financials.copy()
+        for column in positioning_cols[1:]:
+            merged[column] = np.nan
+    else:
+        merged = financials.merge(
+            positioning[positioning_cols], on="bank_id", how="left"
+        )
+
+    return merged[
+        [
+            "bank_id",
+            "bank_name",
+            "home_market",
+            "listed_status",
+            "period",
+            "total_assets_m",
+            "customer_loans_m",
+            "customer_deposits_m",
+            "total_income_m",
+            "nii_m",
+            "net_profit_m",
+            "reported_return_pct",
+            "return_metric_type",
+            "cet1_ratio_pct",
+            "cost_income_ratio_pct",
+            "cost_of_risk_bps",
+            "lcr_pct",
+            "npe_ratio_pct",
+            *positioning_cols[1:],
+            "source_name",
+            "source_url",
+            "data_quality",
+            "notes",
+        ]
+    ]
+
+
+@st.cache_data
+def cfo_peer_benchmarks():
+    return load_peer_benchmarks()
+
+
+@st.cache_data
+def cfo_strategic_radar():
+    radar = load_strategic_radar()
+    if radar.empty:
+        return radar
+
+    return radar.sort_values("opportunity_rank").reset_index(drop=True)
+
+
+@st.cache_data
+def cfo_capability_gaps():
+    return load_strategic_capability_map()
+
+
+@st.cache_data
+def metrics_history():
+    """
+    The monthly metrics frame indexed by date.
+
+    This is the shape the AI partners expect (``src.ai_partner`` and
+    ``src.openai_partner`` both index by position and read ``df.index[-1]``).
+    """
+    return raw_bank_history().set_index("date")

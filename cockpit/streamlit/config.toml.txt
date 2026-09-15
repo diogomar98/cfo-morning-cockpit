@@ -1,0 +1,12 @@
+# The HUD stylesheet paints the app shell, cards and charts, but leaves
+# Streamlit's own widgets (dataframes, selects, sliders) to the base theme.
+# Dark base is what keeps those consistent with the cockpit.
+[theme]
+base = "dark"
+backgroundColor = "#02070c"
+secondaryBackgroundColor = "#06111a"
+primaryColor = "#52e7ff"
+textColor = "#e9fbff"
+
+[client]
+toolbarMode = "minimal"

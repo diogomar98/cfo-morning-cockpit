@@ -1,0 +1,191 @@
+"""
+Assert every certified view is non-empty and exposes the exact columns the
+reference cockpit's SQL view produced.
+
+Run this before touching UI code: a missing or renamed column surfaces here as
+a clear diff instead of a KeyError deep inside an f-string.
+
+    python scripts/check_views.py
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from src import cockpit_views as views  # noqa: E402
+
+# Column contracts transcribed from build_certified_views.py in the reference
+# repository. Order is not asserted; membership is.
+EXPECTED = {
+    "cfo_financial_history": [
+        "date", "loans_m", "deposits_m", "deposit_movement_m",
+        "loan_growth_mom_pct", "gross_carrying_amount_m", "ead_m",
+        "provisions_m", "stage_1_share_pct", "stage_2_share_pct",
+        "stage_3_share_pct", "rwa_m", "cet1_capital_m", "at1_capital_m",
+        "tier2_capital_m", "hqla_m", "net_cash_outflows_m", "ecb_rate_pct",
+        "avg_loan_yield_pct", "avg_deposit_cost_pct", "nii_m", "fee_income_m",
+        "other_income_m", "operating_income_m", "operating_costs_m",
+        "provision_charge_m", "pre_tax_profit_m", "tax_expense_m",
+        "net_profit_m", "dividends_m", "retained_earnings_m",
+        "cost_income_ratio_pct", "cet1_ratio_pct", "lcr_pct",
+        "loan_to_deposit_pct", "total_capital_ratio_pct", "total_assets_m",
+        "total_liabilities_m",
+    ],
+    "cfo_current_position": [
+        "as_of_date", "loans_m", "deposits_m", "total_assets_m",
+        "total_liabilities_m", "rwa_m", "cet1_capital_m", "at1_capital_m",
+        "tier2_capital_m", "cet1_ratio_pct", "total_capital_ratio_pct",
+        "hqla_m", "net_cash_outflows_m", "lcr_pct", "loan_to_deposit_pct",
+        "stage_1_share_pct", "stage_2_share_pct", "stage_3_share_pct",
+        "ecb_rate_pct", "avg_loan_yield_pct", "avg_deposit_cost_pct",
+        "reporting_year", "months_observed", "ytd_nii_m", "ytd_fee_income_m",
+        "ytd_operating_income_m", "ytd_operating_costs_m",
+        "ytd_provision_charge_m", "ytd_pre_tax_profit_m", "ytd_net_profit_m",
+        "ytd_cost_income_ratio_pct", "annualised_ytd_roe_proxy_pct",
+    ],
+    "cfo_daily_bank": [
+        "date", "interest_earning_assets_m", "deposit_balance_m",
+        "daily_interest_income_m", "daily_interest_expense_m", "daily_nii_m",
+        "weighted_loan_rate_pct", "weighted_deposit_rate_pct",
+        "annualised_daily_nim_pct", "ecb_rate_pct", "rwa_m", "has_anomaly",
+    ],
+    "cfo_daily_country": [
+        "date", "country", "interest_earning_assets_m", "deposit_balance_m",
+        "daily_interest_income_m", "daily_interest_expense_m", "daily_nii_m",
+        "weighted_loan_rate_pct", "weighted_deposit_rate_pct",
+        "annualised_daily_nim_pct", "rwa_m", "weighted_stage_2_share_pct",
+        "weighted_stage_3_share_pct", "has_anomaly",
+    ],
+    "cfo_daily_business_country": [
+        "date", "country", "business_line", "interest_earning_assets_m",
+        "deposit_balance_m", "daily_nii_m", "rwa_m",
+        "weighted_stage_2_share_pct", "weighted_stage_3_share_pct",
+        "has_anomaly",
+    ],
+    "cfo_monthly_nim": [
+        "month", "monthly_nii_m", "avg_interest_earning_assets_m",
+        "days_observed", "nim_pct",
+    ],
+    "cfo_deposit_signals": [
+        "date", "country", "business_line", "deposit_balance_m",
+        "deposit_change_1d_m", "deposit_change_1d_pct", "deposit_change_7d_m",
+        "deposit_change_7d_pct", "deposit_change_30d_m",
+        "deposit_change_30d_pct",
+    ],
+    "cfo_credit_signals": [
+        "date", "country", "business_line", "loan_balance_m", "rwa_m",
+        "weighted_stage_1_share_pct", "weighted_stage_2_share_pct",
+        "weighted_stage_3_share_pct", "credit_watch_flag",
+    ],
+    "cfo_news_intelligence": [
+        "news_id", "published_date", "headline", "source", "source_url",
+        "category", "geographic_scope", "summary", "primary_affected_metric",
+        "secondary_metrics", "impact_direction", "potential_impact_level",
+        "relevance_score", "confidence_score", "bank_impact_summary",
+        "suggested_action", "linked_scenario", "scenario_status", "country",
+        "country_code", "bank_exposure_share_pct",
+        "geographic_relevance_weight", "geo_impact_score", "map_impact_level",
+        "signed_geo_score", "exposure_reason", "classification_method",
+        "is_public_source",
+    ],
+    "cfo_geo_news_summary": [
+        "country", "country_code", "bank_exposure_share_pct",
+        "relevant_news_count", "high_impact_news_count",
+        "medium_impact_news_count", "max_geo_impact_score",
+        "avg_geo_impact_score", "geo_attention_score", "latest_news_date",
+    ],
+    "cfo_treasury_summary": [
+        "as_of_date", "book_value_m", "market_value_m", "unrealized_pnl_m",
+        "weighted_modified_duration", "portfolio_dv01_m_per_bp",
+        "fvoci_market_value_m", "amortised_cost_market_value_m",
+        "green_bond_market_value_m",
+    ],
+    "cfo_treasury_scenarios": [
+        "scenario_name", "scenario_description", "rate_shock_bps",
+        "credit_spread_shock_bps", "base_market_value_m",
+        "stressed_market_value_m", "economic_value_impact_m",
+        "economic_value_impact_pct", "estimated_oci_impact_m",
+        "estimated_immediate_pnl_impact_m",
+    ],
+    "cfo_hedge_options": [
+        "hedge_id", "hedge_name", "hedge_instrument",
+        "assumed_swap_duration_years", "hedge_notional_m",
+        "target_dv01_reduction_m_per_bp", "portfolio_dv01_before_m_per_bp",
+        "portfolio_dv01_after_m_per_bp", "dv01_reduction_pct",
+        "rates_plus_50bp_pnl_before_m", "estimated_hedge_gain_plus_50bp_m",
+        "rates_plus_50bp_pnl_after_m", "estimated_annual_carry_m",
+        "methodology_note",
+    ],
+    "cfo_peer_benchmark": [
+        "bank_id", "bank_name", "home_market", "listed_status", "period",
+        "total_assets_m", "customer_loans_m", "customer_deposits_m",
+        "total_income_m", "nii_m", "net_profit_m", "reported_return_pct",
+        "return_metric_type", "cet1_ratio_pct", "cost_income_ratio_pct",
+        "cost_of_risk_bps", "lcr_pct", "npe_ratio_pct",
+        "profitability_peer_median_pct", "cet1_peer_median_pct",
+        "cost_income_peer_median_pct", "profitability_vs_peer_median_pp",
+        "cet1_vs_peer_median_pp", "efficiency_vs_peer_median_pp",
+        "positioning_quadrant", "comparison_caveat", "source_name",
+        "source_url", "data_quality", "notes",
+    ],
+    "cfo_peer_benchmarks": [
+        "metric", "metric_label", "peer_count", "peer_min", "peer_q1",
+        "peer_median", "peer_q3", "peer_max", "benchmark_note",
+    ],
+    "cfo_strategic_radar": [
+        "opportunity_rank", "company_id", "company_name",
+        "headquarters_country", "ownership_status", "capability_domain",
+        "business_model_summary", "public_scale_metric", "public_metric_period",
+        "public_source_url", "strategic_gap_addressed", "preferred_route",
+        "strategic_fit_score", "financial_attractiveness_score",
+        "integration_feasibility_score", "affordability_score",
+        "regulatory_complexity_score", "innovation_score",
+        "time_to_value_score", "size_score", "overall_opportunity_score",
+        "radar_status", "strategic_rationale", "key_risk", "scoring_method",
+        "scores_are_synthetic",
+    ],
+    "cfo_capability_gaps": [
+        "capability", "current_score", "target_score", "capability_gap",
+        "priority", "benchmark_direction", "linked_companies",
+        "strategic_objective", "assessment_type", "scores_are_synthetic",
+    ],
+}
+
+
+def main():
+    failures = []
+
+    for name, expected_columns in EXPECTED.items():
+        try:
+            frame = getattr(views, name)()
+        except Exception as error:  # noqa: BLE001 - report, don't abort the sweep
+            failures.append(f"{name}: raised {type(error).__name__}: {error}")
+            continue
+
+        if frame is None or frame.empty:
+            failures.append(f"{name}: returned no rows")
+            continue
+
+        missing = [c for c in expected_columns if c not in frame.columns]
+        if missing:
+            failures.append(f"{name}: missing columns {missing}")
+            continue
+
+        print(f"OK   {name} ({len(frame):,} rows, {len(frame.columns)} columns)")
+
+    print()
+    if failures:
+        print("-" * 70)
+        for failure in failures:
+            print(f"FAIL {failure}")
+        print("-" * 70)
+        print(f"{len(failures)} of {len(EXPECTED)} certified views failed.")
+        return 1
+
+    print(f"All {len(EXPECTED)} certified views match the reference contract.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

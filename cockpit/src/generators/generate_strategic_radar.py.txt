@@ -1,0 +1,95 @@
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+COMPANIES = [
+    {"company_id": "WORLDLINE", "company_name": "Worldline", "headquarters_country": "France", "ownership_status": "Listed", "capability_domain": "Payments Infrastructure", "business_model_summary": "European payments infrastructure and merchant/financial-services platform.", "public_scale_metric": "H1 2026 published revenue \u20ac1.897bn; adjusted EBITDA \u20ac328m; net debt \u20ac1.165bn.", "public_metric_period": "H1 2026", "public_source_url": "https://investors.worldline.com/en/home/news-events/financial-press-releases/2026/pr-2026_07_30_01", "strategic_gap_addressed": "Payments scale; merchant acquiring; European payment infrastructure", "preferred_route": "Strategic partnership / carve-out watch", "strategic_fit_score": 88, "financial_attractiveness_score": 62, "integration_feasibility_score": 58, "affordability_score": 52, "regulatory_complexity_score": 68, "innovation_score": 78, "time_to_value_score": 68, "size_score": 78, "strategic_rationale": "Could accelerate European payments capabilities and merchant reach, but a full acquisition would be complex and capital intensive.", "key_risk": "Turnaround execution, integration complexity and payments-regulation exposure."},
+    {"company_id": "NEXI", "company_name": "Nexi", "headquarters_country": "Italy", "ownership_status": "Listed", "capability_domain": "Payments Infrastructure", "business_model_summary": "Large European PayTech serving merchants, banks, corporates and consumers.", "public_scale_metric": "FY2025 revenue \u20ac3.583bn; EBITDA \u20ac1.901bn; ~3m merchants; ~250 banks served.", "public_metric_period": "FY 2025", "public_source_url": "https://www.nexigroup.com/en/investor-relations/overview/", "strategic_gap_addressed": "Pan-European payments scale; issuing; acquiring; merchant solutions", "preferred_route": "Strategic partnership / monitor", "strategic_fit_score": 86, "financial_attractiveness_score": 79, "integration_feasibility_score": 48, "affordability_score": 38, "regulatory_complexity_score": 72, "innovation_score": 74, "time_to_value_score": 61, "size_score": 90, "strategic_rationale": "Strong strategic fit for European payments scale, but size makes a full transaction less realistic for the fictional bank.", "key_risk": "Large transaction size, integration burden and regulatory complexity."},
+    {"company_id": "WISE", "company_name": "Wise", "headquarters_country": "United Kingdom", "ownership_status": "Listed", "capability_domain": "Cross-Border Payments", "business_model_summary": "Global technology platform for cross-border money movement and multi-currency accounts.", "public_scale_metric": "FY2026 net revenue $2.5bn; 18.9m active customers; $243.5bn cross-border volume.", "public_metric_period": "FY 2026", "public_source_url": "https://owners.wise.com/news-releases/news-release-details/wise-fy26-results", "strategic_gap_addressed": "Cross-border payments; low-cost FX; SME international banking", "preferred_route": "Strategic partnership / minority investment", "strategic_fit_score": 92, "financial_attractiveness_score": 90, "integration_feasibility_score": 65, "affordability_score": 28, "regulatory_complexity_score": 70, "innovation_score": 94, "time_to_value_score": 77, "size_score": 88, "strategic_rationale": "Strong route to ING-like international digital capability without requiring the bank to build a global payments network internally.", "key_risk": "High valuation/size and overlap with regulated cross-border payments infrastructure."},
+    {"company_id": "TEMENOS", "company_name": "Temenos", "headquarters_country": "Switzerland", "ownership_status": "Listed", "capability_domain": "Core Banking Technology", "business_model_summary": "Global banking-software provider focused on core banking, SaaS and composable banking technology.", "public_scale_metric": "FY2025 pro-forma revenue $1.071bn; ARR $860m; free cash flow $256m.", "public_metric_period": "FY 2025", "public_source_url": "https://www.temenos.com/online-summary/", "strategic_gap_addressed": "Core modernization; composable banking; faster product launches", "preferred_route": "Strategic partnership / platform transformation", "strategic_fit_score": 89, "financial_attractiveness_score": 82, "integration_feasibility_score": 72, "affordability_score": 34, "regulatory_complexity_score": 52, "innovation_score": 88, "time_to_value_score": 72, "size_score": 76, "strategic_rationale": "Directly supports the move toward a more scalable and digitally competitive universal-bank operating model.", "key_risk": "Large-scale core migration risk and vendor dependency."},
+    {"company_id": "BACKBASE", "company_name": "Backbase", "headquarters_country": "Netherlands", "ownership_status": "Private", "capability_domain": "Digital Banking & Agentic AI", "business_model_summary": "AI-native banking operating system for customer, employee and AI-agent workflows.", "public_scale_metric": "Used by 120+ financial institutions across retail, commercial, private banking and wealth.", "public_metric_period": "2026", "public_source_url": "https://www.backbase.com/about", "strategic_gap_addressed": "Digital engagement; agentic AI; unified customer/front-office experience", "preferred_route": "Strategic partnership / minority investment", "strategic_fit_score": 96, "financial_attractiveness_score": 84, "integration_feasibility_score": 82, "affordability_score": 48, "regulatory_complexity_score": 44, "innovation_score": 98, "time_to_value_score": 84, "size_score": 70, "strategic_rationale": "Highly aligned with the bank's desired AI-native direction and could accelerate front-end modernization without replacing the entire balance-sheet engine.", "key_risk": "Platform dependency and integration with legacy core systems."},
+    {"company_id": "MAMBU", "company_name": "Mambu", "headquarters_country": "Netherlands / Germany", "ownership_status": "Private", "capability_domain": "Cloud Core Banking", "business_model_summary": "Cloud-native, composable core banking platform with API-first architecture.", "public_scale_metric": "Global cloud-native core platform; 99.99% uptime SLA and billions of API calls supported.", "public_metric_period": "2026", "public_source_url": "https://mambu.com/en/cloud-banking-platform", "strategic_gap_addressed": "Cloud core; modular product architecture; faster time to market", "preferred_route": "Strategic partnership / selective acquisition watch", "strategic_fit_score": 94, "financial_attractiveness_score": 78, "integration_feasibility_score": 78, "affordability_score": 52, "regulatory_complexity_score": 48, "innovation_score": 95, "time_to_value_score": 81, "size_score": 66, "strategic_rationale": "Strong fit for a modular cloud transformation and a credible route toward more ING-like digital product velocity.", "key_risk": "Migration complexity and need to coexist with legacy core architecture."},
+    {"company_id": "FOURTHLINE", "company_name": "Fourthline", "headquarters_country": "Netherlands", "ownership_status": "Private", "capability_domain": "KYC / AML / Identity", "business_model_summary": "AI-powered digital identity, KYC, AML and financial-crime compliance platform.", "public_scale_metric": "240+ employees; millions of KYC checks; company states 99.98% identity-check accuracy.", "public_metric_period": "2026", "public_source_url": "https://www.fourthline.com/about-us", "strategic_gap_addressed": "Digital onboarding; AML automation; fraud reduction; compliance efficiency", "preferred_route": "Acquisition / strategic investment candidate", "strategic_fit_score": 93, "financial_attractiveness_score": 83, "integration_feasibility_score": 89, "affordability_score": 79, "regulatory_complexity_score": 58, "innovation_score": 92, "time_to_value_score": 91, "size_score": 42, "strategic_rationale": "A focused capability acquisition could improve onboarding, compliance automation and customer experience with manageable integration scope.", "key_risk": "Highly regulated identity stack and model-risk/governance requirements."},
+    {"company_id": "SIGNICAT", "company_name": "Signicat", "headquarters_country": "Norway", "ownership_status": "Private / PE-owned", "capability_domain": "Digital Identity", "business_model_summary": "European digital-identity and trust-services platform covering verification, authentication, signatures and orchestration.", "public_scale_metric": "21,000+ companies use Signicat; 500+ digital identity experts; Nordic Capital ownership.", "public_metric_period": "2026", "public_source_url": "https://www.signicat.com/about", "strategic_gap_addressed": "Cross-border digital identity; eID; authentication; trust services", "preferred_route": "Minority investment / partnership / acquisition watch", "strategic_fit_score": 90, "financial_attractiveness_score": 80, "integration_feasibility_score": 84, "affordability_score": 61, "regulatory_complexity_score": 61, "innovation_score": 90, "time_to_value_score": 86, "size_score": 58, "strategic_rationale": "Adds scalable European identity infrastructure and helps support cross-border digital expansion.", "key_risk": "Sponsor ownership, valuation uncertainty and regulatory dependence on identity frameworks."},
+    {"company_id": "MOLLIE", "company_name": "Mollie", "headquarters_country": "Netherlands", "ownership_status": "Private", "capability_domain": "SME Payments & Financial Services", "business_model_summary": "European payments and financial-services platform focused on businesses and merchant operations.", "public_scale_metric": "After acquiring GoCardless in Sep 2026, group serves 350,000+ businesses across 30+ markets.", "public_metric_period": "September 2026", "public_source_url": "https://www.mollie.com/news/mollie-and-gocardless", "strategic_gap_addressed": "SME ecosystem; merchant payments; bank payments; business financing", "preferred_route": "Strategic partnership / minority investment / monitor", "strategic_fit_score": 91, "financial_attractiveness_score": 87, "integration_feasibility_score": 74, "affordability_score": 43, "regulatory_complexity_score": 63, "innovation_score": 91, "time_to_value_score": 83, "size_score": 74, "strategic_rationale": "Would strengthen the SME proposition and embed payments deeper into business banking.", "key_risk": "Rapid post-acquisition integration at Mollie and potential overlap with existing bank services."},
+    {"company_id": "ADYEN", "company_name": "Adyen", "headquarters_country": "Netherlands", "ownership_status": "Listed", "capability_domain": "Enterprise Payments & Money Movement", "business_model_summary": "Global financial technology platform combining payments, data and financial products.", "public_scale_metric": "H1 2026 net revenue \u20ac1.303bn; EBITDA \u20ac641.5m; processed volume \u20ac803.8bn.", "public_metric_period": "H1 2026", "public_source_url": "https://www.adyen.com/press-and-media/adyen-publishes-h1-2026-financial-results-3wjne", "strategic_gap_addressed": "Enterprise payments; intelligent money movement; agentic commerce", "preferred_route": "Strategic partnership / benchmark", "strategic_fit_score": 95, "financial_attractiveness_score": 96, "integration_feasibility_score": 67, "affordability_score": 12, "regulatory_complexity_score": 66, "innovation_score": 99, "time_to_value_score": 74, "size_score": 98, "strategic_rationale": "Excellent strategic benchmark for payments innovation, but acquisition economics are unrealistic for the fictional bank.", "key_risk": "Very low affordability for an acquisition and strong standalone growth trajectory."}
+]
+
+CAPABILITIES = [
+    {"capability": "Digital Banking & AI", "current_score": 58, "target_score": 90, "priority": "HIGH", "benchmark_direction": "Move toward leading European digital-bank operating models such as ING", "linked_companies": "Backbase; Mambu; Temenos", "strategic_objective": "Create an AI-native, modular customer and employee banking experience."},
+    {"capability": "Payments & Money Movement", "current_score": 61, "target_score": 92, "priority": "HIGH", "benchmark_direction": "Build toward European-scale digital payments capabilities", "linked_companies": "Adyen; Worldline; Nexi; Mollie; Wise", "strategic_objective": "Expand acquiring, money movement, cross-border and embedded payments capabilities."},
+    {"capability": "Cross-Border & International", "current_score": 52, "target_score": 84, "priority": "HIGH", "benchmark_direction": "Move toward ING-like international digital scalability", "linked_companies": "Wise; Signicat; Mambu", "strategic_objective": "Lower friction and cost for multi-market customers and international SMEs."},
+    {"capability": "KYC / AML Automation", "current_score": 64, "target_score": 91, "priority": "HIGH", "benchmark_direction": "Become a top-quartile digital onboarding and compliance operator", "linked_companies": "Fourthline; Signicat", "strategic_objective": "Reduce onboarding friction, manual compliance effort and financial-crime losses."},
+    {"capability": "Core Banking Modularity", "current_score": 49, "target_score": 83, "priority": "HIGH", "benchmark_direction": "Shift from legacy architecture toward composable/cloud-native banking", "linked_companies": "Mambu; Temenos", "strategic_objective": "Increase product-launch speed and reduce change cost."},
+    {"capability": "SME Ecosystem", "current_score": 60, "target_score": 86, "priority": "MEDIUM", "benchmark_direction": "Build deeper platform economics in business banking", "linked_companies": "Mollie; Wise; Adyen", "strategic_objective": "Combine banking, payments and business financial tools in one SME proposition."},
+    {"capability": "Capital & Balance-Sheet Strength", "current_score": 78, "target_score": 82, "priority": "MEDIUM", "benchmark_direction": "Preserve resilience while improving returns toward stronger peers", "linked_companies": "", "strategic_objective": "Use capital efficiently while maintaining a robust CET1 and liquidity profile."},
+    {"capability": "Profitability & Efficiency", "current_score": 62, "target_score": 84, "priority": "HIGH", "benchmark_direction": "Close the return and efficiency gap toward ING-like performance", "linked_companies": "Backbase; Fourthline; Mambu; Temenos", "strategic_objective": "Improve cost/income and ROE through digital scale, automation and operating leverage."}
+]
+
+
+def generate_strategic_radar(output_dir: str = "data"):
+    """
+    Generate strategic_radar.csv and strategic_capability_map.csv.
+
+    Public company descriptions and scale metrics are sourced from official
+    public company disclosures listed in public_source_url.
+
+    All fit, attractiveness, feasibility, affordability, innovation,
+    regulatory-complexity, time-to-value and capability scores are synthetic
+    management-assessment inputs for the fictional-bank prototype. They are
+    not recommendations or valuations from the cited companies.
+    """
+    radar = pd.DataFrame(COMPANIES)
+
+    radar["overall_opportunity_score"] = (
+        0.30 * radar["strategic_fit_score"]
+        + 0.15 * radar["financial_attractiveness_score"]
+        + 0.15 * radar["integration_feasibility_score"]
+        + 0.10 * radar["affordability_score"]
+        + 0.15 * radar["innovation_score"]
+        + 0.10 * radar["time_to_value_score"]
+        + 0.05 * (100 - radar["regulatory_complexity_score"])
+    ).round(1)
+
+    def bucket(score):
+        if score >= 82:
+            return "PRIORITY"
+        if score >= 72:
+            return "WATCH"
+        return "SELECTIVE"
+
+    radar["radar_status"] = radar["overall_opportunity_score"].apply(bucket)
+    radar["scoring_method"] = (
+        "Synthetic management assessment: 30% strategic fit + 15% financial attractiveness + "
+        "15% integration feasibility + 10% affordability + 15% innovation + 10% time-to-value + "
+        "5% inverse regulatory complexity."
+    )
+    radar["scores_are_synthetic"] = True
+
+    radar = radar.sort_values(
+        ["overall_opportunity_score", "strategic_fit_score"],
+        ascending=False
+    ).reset_index(drop=True)
+    radar["opportunity_rank"] = np.arange(1, len(radar) + 1)
+
+    capability_map = pd.DataFrame(CAPABILITIES)
+    capability_map["capability_gap"] = (
+        capability_map["target_score"] - capability_map["current_score"]
+    )
+    capability_map["assessment_type"] = "Synthetic management assessment"
+    capability_map["scores_are_synthetic"] = True
+
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    radar.to_csv(out / "strategic_radar.csv", index=False)
+    capability_map.to_csv(out / "strategic_capability_map.csv", index=False)
+
+    return radar, capability_map
+
+
+if __name__ == "__main__":
+    radar, capability_map = generate_strategic_radar()
+    print(f"Created strategic_radar.csv with {len(radar)} real companies.")
+    print(f"Created strategic_capability_map.csv with {len(capability_map)} capabilities.")

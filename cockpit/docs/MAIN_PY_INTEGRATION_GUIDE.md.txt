@@ -1,0 +1,253 @@
+# Integrating the merged branches into `main.py`
+
+This guide shows the exact edits needed in your existing `main.py` to wire in:
+
+1. The Gemini-powered news signal extractor + What-If apply buttons (colleague 1)
+2. Four new tabs: News Intelligence, Treasury & Hedging, Peer Benchmarking, Strategic Radar (colleague 2, ported)
+
+Apply the edits in order. After each step, save and run `streamlit run main.py` to confirm nothing broke before moving to the next step.
+
+---
+
+## Step 1 — New imports
+
+At the top of `main.py`, add these imports alongside your existing `from src...` imports:
+
+```python
+from src.extended_data_loader import datasets_available
+from src.tab_news_intelligence import render_news_intelligence_tab
+from src.tab_treasury import render_treasury_tab
+from src.tab_peer_benchmarking import render_peer_benchmarking_tab
+from src.tab_strategic_radar import render_strategic_radar_tab
+
+from src.news_partner import load_articles, extract_signals
+from src.news_ui import (
+    apply_pending_signals,
+    render_overnight_signals_panel,
+    render_signal_apply_panel,
+    render_provenance_banner,
+    add_horizon_signal_annotation,
+)
+```
+
+## Step 2 — Load Gemini-extracted news signals once per session
+
+Add this near your existing `df = load_data()` call (top of the script, before the tabs are defined):
+
+```python
+@st.cache_data(show_spinner="Extracting overnight news signals...")
+def load_extracted_signals():
+    """
+    Run the Gemini news-signal extractor over the fixture articles.
+    Cached so Gemini is called once per session, not on every rerun.
+    """
+    articles = load_articles()
+    all_signals = []
+    for article in articles:
+        try:
+            signals = extract_signals(article)
+        except Exception:
+            signals = []
+        for sig in signals:
+            sig["_article"] = article
+        all_signals.extend(signals)
+    return all_signals
+
+
+try:
+    extracted_signals = load_extracted_signals()
+except Exception as error:
+    extracted_signals = []
+    st.sidebar.warning(f"News signal extraction unavailable: {error}")
+```
+
+This requires `GEMINI_API_KEY` to be set. If it is missing, the `try/except` keeps the dashboard running with an empty signal list rather than crashing.
+
+## Step 3 — Add the overnight signals panel to the Morning Health Check tab
+
+Inside your existing `with tab_health:` block, add this near the top (after your KPI tiles, before the trend charts is a good spot):
+
+```python
+    st.divider()
+    render_overnight_signals_panel(extracted_signals)
+```
+
+## Step 4 — Wire signal-apply into the What-If Engine tab
+
+Inside your existing `with tab_scenario:` block, the **very first line** must be:
+
+```python
+with tab_scenario:
+    apply_pending_signals()  # MUST run before any slider with a matching key is created
+    st.subheader("What-If Engine")
+    ...
+```
+
+Then, after your existing sliders (`rate_shock_bps`, `deposit_outflow_pct`, `stage_2_increase`, `stage_3_increase`), make sure each slider uses these exact `key=` values so `news_ui` can drive them:
+
+```python
+rate_shock_bps = st.slider(
+    "ECB rate shock (bps)", min_value=-200, max_value=200, value=0, step=25,
+    key="scenario_rate_shock_bps",
+)
+deposit_outflow_pct = st.slider(
+    "Deposit outflow (%)", min_value=0.0, max_value=25.0, value=0.0, step=0.5,
+    key="scenario_deposit_outflow_pct",
+)
+stage_2_increase = st.slider(
+    "Stage 2 migration (pp)", min_value=0.0, max_value=10.0, value=0.0, step=0.5,
+    key="scenario_stage_2_increase",
+)
+stage_3_increase = st.slider(
+    "Stage 3 migration (pp)", min_value=0.0, max_value=5.0, value=0.0, step=0.25,
+    key="scenario_stage_3_increase",
+)
+```
+
+If your existing sliders don't have `key=` set, add it now — `news_ui.apply_pending_signals()` writes directly into `st.session_state[key]`, so the key names must match exactly.
+
+Then, in a sidebar or expander within the same tab, add the actionable-signal apply panel:
+
+```python
+    with st.expander("\U0001F4F0 Apply a news-driven scenario", expanded=False):
+        actionable = [s for s in extracted_signals if s.get("engine_param")]
+        render_signal_apply_panel(actionable)
+
+    if "applied_signal" in st.session_state:
+        render_provenance_banner(st.session_state["applied_signal"])
+```
+
+## Step 5 — Annotate Horizon View charts when a signal is applied
+
+Inside `with tab_horizon:`, find where you build each forecast figure (the `fig = go.Figure()` block from the confidence-interval work). Right before `st.plotly_chart(fig, use_container_width=True)`, add:
+
+```python
+            add_horizon_signal_annotation(fig, metric)
+```
+
+`metric` here refers to the loop variable you already use (`"cet1_ratio_pct"`, `"nim_pct"`, etc.).
+
+## Step 6 — Add the four new tabs
+
+Find your existing tabs declaration:
+
+```python
+tab_health, tab_scenario, tab_horizon, tab_ai = st.tabs(
+    [
+        "Morning Health Check",
+        "What-If Engine",
+        "Horizon View",
+        "AI Financial Partner",
+    ]
+)
+```
+
+Replace it with:
+
+```python
+tab_health, tab_scenario, tab_horizon, tab_ai, tab_news, tab_treasury, tab_peers, tab_strategy = st.tabs(
+    [
+        "Morning Health Check",
+        "What-If Engine",
+        "Horizon View",
+        "AI Financial Partner",
+        "News Intelligence",
+        "Treasury & Hedging",
+        "Peer Benchmarking",
+        "Strategic Radar",
+    ]
+)
+```
+
+Then, at the end of the file (after your existing `with tab_ai:` block), add:
+
+```python
+with tab_news:
+    render_news_intelligence_tab()
+
+with tab_treasury:
+    render_treasury_tab()
+
+with tab_peers:
+    render_peer_benchmarking_tab({
+        "cet1_ratio_pct": float(latest["cet1_ratio_pct"]),
+        "cost_to_income_pct": float(latest["cost_to_income_pct"]),
+    })
+
+with tab_strategy:
+    render_strategic_radar_tab()
+```
+
+`latest` here is the same `df.iloc[-1]` row you already compute near the top of `main.py` for the Morning Health Check KPIs. If your variable is named differently (e.g. `latest_row`), adjust accordingly.
+
+## Step 7 — Sidebar data-status indicator (optional but recommended)
+
+In your existing `with st.sidebar:` block, add:
+
+```python
+    st.divider()
+    st.caption("Extended datasets")
+    status = datasets_available()
+    missing = [name for name, ok in status.items() if not ok]
+    if missing:
+        st.warning(
+            f"{len(missing)} extended dataset(s) not yet generated. "
+            "Run `python -m src.generators.generate_all_data`."
+        )
+    else:
+        st.success("All extended datasets loaded.")
+```
+
+---
+
+## Files this guide assumes are already in your project
+
+```text
+src/
+├── extended_data_loader.py      <- new
+├── tab_news_intelligence.py     <- new
+├── tab_treasury.py              <- new
+├── tab_peer_benchmarking.py     <- new
+├── tab_strategic_radar.py       <- new
+├── news_partner.py              <- from colleague 1
+├── news_ui.py                   <- from colleague 1
+├── config.py                    <- from colleague 1
+├── databricks_partner.py        <- from colleague 1 (optional, mock-safe)
+├── gemini_partner.py            <- updated (adds build_executive_prompt)
+└── generators/
+    ├── __init__.py
+    ├── generate_bank_daily_signals.py
+    ├── generate_treasury_portfolio.py
+    ├── generate_peer_financials.py
+    ├── generate_strategic_radar.py
+    ├── generate_news_signals.py
+    └── generate_all_data.py
+
+data/
+└── news_fixtures.json
+```
+
+## Before running, generate the data
+
+```powershell
+python -m src.generators.generate_all_data
+```
+
+This populates `data/` with all 12 new/updated CSVs (bank_history, bank_daily_signals, news_signals, news_geo_impact, treasury_portfolio, treasury_scenario_impacts, treasury_hedge_options, peer_financials, peer_positioning, peer_benchmarks, strategic_radar, strategic_capability_map). It takes under a minute.
+
+## Install the one new dependency
+
+```powershell
+pip install databricks-sdk
+```
+
+This is only imported lazily inside `databricks_partner.py._get_client()`, so it's safe even if you never configure Databricks credentials — but the import must succeed at module load time for `config.py`'s check, so install it regardless.
+
+## Final checklist before your demo
+
+- [ ] `python -m src.generators.generate_all_data` completes with no errors and all 12 files show `OK`
+- [ ] `GEMINI_API_KEY` is set in `.env` (news signal extraction needs it)
+- [ ] `streamlit run main.py` opens without exceptions
+- [ ] Morning Health Check shows the "Overnight signals" expander
+- [ ] What-If Engine shows the "Apply a news-driven scenario" expander and Apply buttons actually move the sliders
+- [ ] News Intelligence, Treasury & Hedging, Peer Benchmarking, and Strategic Radar tabs all render without "No ... found" warnings

@@ -1,0 +1,304 @@
+"""
+AI-Native CFO Morning Cockpit.
+
+The shell: page setup, the stylesheet, the greeting gate, the pinned command
+bar and the one-screen home — executive KPIs on the left, the radial command
+dial in the centre, the intelligence lenses on the right. Selecting any of
+them opens that section as a window over the home page; everything inside a
+window lives in ``src/modules``.
+"""
+
+import html
+
+import streamlit as st
+
+from src.cockpit_state import build_state
+from src.extended_data_loader import datasets_available
+from src.hud import (
+    active_class,
+    arrow_delta,
+    close_module,
+    enter_url,
+    explain_panel,
+    get_selected_module,
+    has_entered,
+    module_url,
+    render_html,
+)
+from src.hud_css import BASE_CSS, EXTENSIONS_CSS, LOCAL_CSS, PANELS_CSS
+from src.modules import MODULE_METADATA, RENDERERS
+from src.modules.copilot import consume_investigation_topic
+from src.rag import confidence_badge, confidence_label, rag_badge
+from src.weather import get_local_weather
+
+st.set_page_config(
+    page_title="A.R.C. | CFO Command",
+    page_icon="◉",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
+from src.openai_partner import test_llm
+
+if st.button("Test LLM"):
+    st.write(test_llm())
+
+# Emitted in cascade order; LOCAL_CSS last so this cockpit's overrides win.
+for stylesheet in (BASE_CSS, EXTENSIONS_CSS, PANELS_CSS, LOCAL_CSS):
+    render_html(stylesheet)
+
+# The greeting stands alone: no state, no data load, one way forward.
+if not has_entered():
+    render_html(
+        f"""
+        <div class="cockpit-gate">
+            <div class="gate-kicker">CFO Command Center</div>
+            <h1 class="gate-greeting">Good afternoon <strong>Ferdi</strong></h1>
+            <a class="gate-orb" href="{enter_url()}" target="_self" aria-label="Start explore">
+                <span class="core-orbit-html" aria-hidden="true"></span>
+                <span class="core-reactor-html" aria-hidden="true"></span>
+                <span class="core-scan-html" aria-hidden="true"></span>
+                <span class="core-copy-html">
+                    <span class="core-code-html">Enter cockpit</span>
+                    <strong class="core-main-html">Start<br>Explore</strong>
+                    <span class="core-online-html">Systems ready</span>
+                </span>
+            </a>
+        </div>
+        """
+    )
+    st.stop()
+
+s = build_state()
+selected_module = get_selected_module()
+
+# One-click handoffs from a decision lens must arm the Copilot before it renders.
+consume_investigation_topic(selected_module)
+
+
+# ============================================================
+# COMMAND BAR
+# ============================================================
+
+weather = get_local_weather()
+
+if weather is None:
+    weather_pill = ""
+else:
+    weather_place = html.escape(weather["place"])
+    weather_label = html.escape(weather["label"])
+    weather_range = (
+        ""
+        if weather["high_c"] is None or weather["low_c"] is None
+        else f" · H {weather['high_c']:.0f}° L {weather['low_c']:.0f}°"
+    )
+    weather_pill = (
+        f'<span class="data-pill weather-pill">'
+        f'<span class="weather-glyph">{weather["glyph"]}</span>'
+        f'{weather_place} / {weather["temperature_c"]:.0f}°C · '
+        f'{weather_label}{weather_range}</span>'
+    )
+
+# One frozen line: the identity, the dates the cockpit is reading, and the
+# local conditions.
+render_html(
+    f"""
+    <div class="hud-hero" id="command-bar">
+        <a class="system-kicker hero-home-link" href="{module_url('home')}" target="_self"
+           aria-label="Back to the CFO overview">
+            <span class="hero-home-glyph" aria-hidden="true">&#8962;</span>
+            AI CFO COMMAND CENTER
+        </a>
+        <div class="hero-status-row">
+            <span class="data-pill">Live data / {s.live_date}</span>
+            <span class="data-pill">Close / {s.close_date}</span>
+            <span class="data-pill">{s.executive_change_count} changes summarized</span>
+            {weather_pill}
+        </div>
+    </div>
+    """
+)
+
+
+# ============================================================
+# LEFT — EXECUTIVE KPIS
+# ============================================================
+
+def kpi_slot(card):
+    """A headline ratio with its RAG; hovering opens why / impact / next / RAG."""
+    return f"""
+    <div class="kpi-slot" tabindex="0">
+        <div class="kpi-card">
+            <div class="kpi-label">{card['label']}</div>
+            <div class="kpi-value">{card['value']}</div>
+            <div class="executive-delta">{arrow_delta(card['delta_pp'])} vs {s.previous_month_label}</div>
+            <div class="executive-context">{card['context']}</div>
+            <div class="kpi-badges">{rag_badge(card['rag'])}</div>
+            <span class="kpi-hint" aria-hidden="true">why · impact · next</span>
+        </div>
+        {explain_panel(
+            card['label'], card['why'], card['impact'], card['next'], card['rag'],
+            footer=f'<a class="kpi-explain-link" href="{module_url(card["module"])}" target="_self">Open the full lens &rarr;</a>',
+        )}
+    </div>
+    """
+
+
+kpi_column = "".join(kpi_slot(card) for card in s.kpi_cards)
+
+
+# ============================================================
+# CENTRE — RADIAL COMMAND DIAL
+# ============================================================
+
+def dial(module):
+    return active_class(module, selected_module)
+
+
+selection_class = "has-selection" if selected_module != "home" else ""
+horizon_confidence = confidence_label(s.conf_horizon_ye_nim)
+
+dial_column = f"""
+<div class="integrated-system {selection_class}" id="radial-command">
+    <div class="system-grid is-solo">
+        <div class="dial-viewport">
+            <div class="command-dial-html" role="navigation" aria-label="Interactive CFO command dial">
+                <span class="dial-grid-disc-html" aria-hidden="true"></span><span class="dial-crosshair-html" aria-hidden="true"></span><span class="dial-tick-shell-html" aria-hidden="true"></span><span class="dial-rotor-html rotor-outer" aria-hidden="true"></span><span class="dial-rotor-html rotor-inner" aria-hidden="true"></span><span class="dial-annulus-bed-html" aria-hidden="true"></span>
+                <a class="css-sector css-sector-brief {dial('brief')}" href="{module_url('brief')}" target="_self" aria-label="Open Morning Brief" title="Morning Brief — click to open"><span class="dial-hit-copy">Morning Brief</span></a>
+                <a class="css-sector css-sector-horizon {dial('horizon')}" href="{module_url('horizon')}" target="_self" aria-label="Open Horizon" title="Horizon — click to open"><span class="dial-hit-copy">Horizon</span></a>
+                <a class="css-sector css-sector-scenario {dial('scenario')}" href="{module_url('scenario')}" target="_self" aria-label="Open What-If Engine" title="What-If Engine — click to open"><span class="dial-hit-copy">What-If Engine</span></a>
+                <span class="sector-label-html sector-label-brief {dial('brief')}"><strong class="sector-title-html">Morning Brief</strong><span class="sector-metric-html">NIM {s.cert_current_nim:.2f}% · {s.nim_mom_bps:+.1f} bps MoM</span><span class="sector-sub-html">News · changes · RAG</span></span>
+                <span class="sector-label-html sector-label-horizon {dial('horizon')}"><strong class="sector-title-html">Horizon</strong><span class="sector-metric-html">YE NIM {s.horizon_year_end_nim:.2f}% · conf {horizon_confidence}</span><span class="sector-sub-html">Trend · run-rate · confidence</span></span>
+                <span class="sector-label-html sector-label-scenario {dial('scenario')}"><strong class="sector-title-html">What-If Engine</strong><span class="sector-metric-html">ECB ±100 bps · 365D max</span><span class="sector-sub-html">Simulate · quantify · compare</span></span>
+                <span class="dial-spoke-html dial-spoke-a" aria-hidden="true"></span><span class="dial-spoke-html dial-spoke-b" aria-hidden="true"></span><span class="dial-spoke-html dial-spoke-c" aria-hidden="true"></span>
+                <a class="css-core {dial('copilot')}" href="{module_url('copilot')}" target="_self" aria-label="Open CFO Copilot" title="Ask CFO Copilot — click to open"><span class="core-orbit-html" aria-hidden="true"></span><span class="core-reactor-html" aria-hidden="true"></span><span class="core-scan-html" aria-hidden="true"></span><span class="core-copy-html"><span class="core-code-html">AI / Investigate</span><strong class="core-main-html">Ask CFO<br>Copilot</strong><span class="core-online-html">Question → evidence</span><span class="core-hint-html">Select core to investigate</span></span></a>
+                <span class="dial-cardinal-html dial-cardinal-n" aria-hidden="true">N / 000</span><span class="dial-cardinal-html dial-cardinal-e" aria-hidden="true">E / 090</span><span class="dial-cardinal-html dial-cardinal-s" aria-hidden="true">S / 180</span><span class="dial-cardinal-html dial-cardinal-w" aria-hidden="true">W / 270</span>
+            </div>
+        </div>
+    </div>
+</div>
+"""
+
+
+# ============================================================
+# RIGHT — INTELLIGENCE LENSES
+# ============================================================
+
+top_strategy_name = (
+    html.escape(str(s.top_strategy["company_name"])) if s.top_strategy is not None else "—"
+)
+news_focus = html.escape(str(s.geo_focus["country"])) if s.geo_focus is not None else "—"
+
+lenses = [
+    (
+        "news", "◇", "News",
+        f"{news_focus} highest attention",
+        f"{s.high_impact_news_count} high impact · internal & external feeds",
+        s.ratings["news_attention"], None,
+    ),
+    (
+        "treasury", "△", "Treasury",
+        f"+50bp {s.treasury_rate50_text}",
+        "Economic value · hedge options",
+        s.ratings["treasury_rate50"], s.conf_treasury_rate50,
+    ),
+    (
+        "peers", "◌", "Peers",
+        f"ROE proxy {s.roe_peer_gap_pp:+.1f}pp",
+        "vs peer median · directional comparison",
+        s.ratings["peer_roe"], None,
+    ),
+    (
+        "strategy", "◎", "Opportunity",
+        f"#1 {top_strategy_name}",
+        "Opportunity radar · why it ranks first",
+        s.ratings["strategy_top"], s.conf_strategy_rank,
+    ),
+]
+
+
+def lens_box(module, icon, title, metric, sub, reading, confidence):
+    conf_html = "" if confidence is None else confidence_badge(confidence)
+    return f"""
+    <a class="dock-action lens-box {dial(module)}" href="{module_url(module)}" target="_self">
+        <span class="dock-icon">{icon}</span>
+        <span class="dock-copy">
+            <strong class="dock-title">{title}</strong>
+            <span class="lens-metric">{metric}</span>
+            <span class="dock-metric">{html.escape(sub)}</span>
+            <span class="kpi-badges">{rag_badge(reading)}{conf_html}</span>
+        </span>
+    </a>
+    """
+
+
+lens_column = "".join(lens_box(*lens) for lens in lenses)
+
+# One grid rather than st.columns: the KPI explanations have to escape their
+# own card over the dial, and a Streamlit column wrapper would clip them.
+render_html(
+    f"""
+    <div class="home-stage">
+        <div class="home-left">{kpi_column}</div>
+        <div class="home-center">{dial_column}</div>
+        <div class="home-right">{lens_column}</div>
+    </div>
+    """
+)
+
+
+# ============================================================
+# SECTION WINDOW
+# ============================================================
+
+def open_window(module):
+    """
+    The selected section, in a window over the home page.
+
+    Dismissing it — the ✕, Escape or a click outside — clears the selection,
+    so the next run draws the home page on its own.
+    """
+    title, description = MODULE_METADATA[module]
+
+    @st.dialog(title)
+    def window():
+        render_html(f'<div class="window-subtitle">{description}</div>')
+
+        # A signal pushed here from the News window explains itself once.
+        applied_signal = st.session_state.pop("scenario_from_signal", None)
+        if applied_signal and module == "scenario":
+            st.info(f"Assumptions pre-filled from an overnight news signal: {applied_signal}.")
+
+        RENDERERS[module](s)
+
+    window()
+
+
+if selected_module != "home":
+    open_window(selected_module)
+
+
+# ============================================================
+# SYSTEM FOOTER
+# ============================================================
+
+dataset_status = datasets_available()
+missing_datasets = [name for name, ok in dataset_status.items() if not ok]
+
+if missing_datasets:
+    dataset_note = (
+        f"{len(missing_datasets)} dataset(s) missing — run "
+        "python -m src.generators.generate_all_data"
+    )
+else:
+    dataset_note = f"{len(dataset_status)} datasets loaded"
+
+render_html(
+    f"""
+    <div class="system-footer">
+        <span>Synthetic data · illustrative only · not for financial decisions</span>
+        <span>{dataset_note}</span>
+        <span>Live data / {s.live_date} · close / {s.close_date}</span>
+    </div>
+    """
+)

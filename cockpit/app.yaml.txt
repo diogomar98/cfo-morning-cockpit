@@ -1,0 +1,6 @@
+command: ["streamlit", "run", "main.py"]
+env:
+  - name: "STREAMLIT_GATHER_USAGE_STATS"
+    value: "false"
+  - name: "GENIE_SPACE_ID"
+    value: "01f1ad042d3113b6b7a383586954667f"
