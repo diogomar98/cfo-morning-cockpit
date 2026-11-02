@@ -18,11 +18,41 @@ from textwrap import dedent
 # ============================================================
 
 st.set_page_config(
-    page_title="A.R.C. | CFO Command",
+    page_title="A.R.C. | BCBS Cockpit",
     page_icon="◉",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
+
+# BCBS workspace router. Existing CFO logic remains below this early exit.
+# Old CFO deep links (?module=brief/horizon/scenario/...) still work without edits.
+def _cfo_workspace_requested():
+    try:
+        params = st.query_params
+        return params.get("workspace") == "cfo" or "module" in params
+    except AttributeError:
+        params = st.experimental_get_query_params()
+        return params.get("workspace", [""])[-1] == "cfo" or "module" in params
+
+
+if not _cfo_workspace_requested():
+    from bcbs_cover_memo import render_bcbs_cockpit
+
+    render_bcbs_cockpit()
+    st.stop()
+
+# A route back to BCBS is visible in every existing CFO module.
+st.html("""
+<div style="padding:10px 14px;margin-bottom:16px;
+background:linear-gradient(95deg,#081e31,#071623);
+border:1px solid rgba(85,229,250,.35);font:700 12px Consolas,monospace;
+letter-spacing:.07em;display:flex;align-items:center;justify-content:space-between">
+  <span style="color:#8dceed">A.R.C. / CFO LEGACY WORKSPACE</span>
+  <a href="?layer=3" target="_self" style="color:#69e8fb;text-decoration:none">
+    ← BCBS COCKPIT / LAYER 03
+  </a>
+</div>
+""")
 
 
 # ============================================================
